@@ -43,7 +43,8 @@ def main():
         '01_config_module.py',
         '02_datapanel_model.py',
         '03_expression_visitor.py',
-        '04_facade_complete.py'
+        '04_facade_complete.py',
+        '05_parquet_data_loading.py'
     ]
     
     results = {}
