@@ -372,3 +372,220 @@ class TestTsMeanIntegration:
 # Import pandas for date range
 import pandas as pd
 
+
+# ============================================================
+# TsAny Operator Tests
+# ============================================================
+
+class TestTsAnyCompute:
+    """Test TsAny.compute() method directly (unit tests)."""
+    
+    def test_compute_basic(self):
+        """Test basic rolling any functionality."""
+        from alpha_canvas.ops.timeseries import TsAny
+        from alpha_canvas.core.expression import Field
+        
+        dates = pd.date_range('2025-01-01', periods=7, freq='D')
+        assets = ['A']
+        
+        # Boolean data: [False, True, False, False, False, True, False]
+        # Window=3, any in window:
+        #   idx 0-1: NaN (not enough data)
+        #   idx 2: any([False, True, False]) = True
+        #   idx 3: any([True, False, False]) = True
+        #   idx 4: any([False, False, False]) = False
+        #   idx 5: any([False, False, True]) = True
+        #   idx 6: any([False, True, False]) = True
+        data = xr.DataArray(
+            [[False], [True], [False], [False], [False], [True], [False]],
+            dims=['time', 'asset'],
+            coords={'time': dates, 'asset': assets}
+        )
+        
+        op = TsAny(child=Field('dummy'), window=3)
+        result = op.compute(data)
+        
+        # Check shape
+        assert result.shape == (7, 1)
+        
+        # NaNs at start
+        assert np.isnan(result.values[0, 0])
+        assert np.isnan(result.values[1, 0])
+        
+        # Rolling any results
+        assert result.values[2, 0] == True   # Had True at idx 1
+        assert result.values[3, 0] == True   # Had True at idx 1
+        assert result.values[4, 0] == False  # No True in window
+        assert result.values[5, 0] == True   # Has True at idx 5
+        assert result.values[6, 0] == True   # Had True at idx 5
+    
+    def test_compute_is_pure_function(self):
+        """Test that compute doesn't modify input."""
+        from alpha_canvas.ops.timeseries import TsAny
+        from alpha_canvas.core.expression import Field
+        
+        dates = pd.date_range('2025-01-01', periods=5, freq='D')
+        assets = ['A']
+        
+        data = xr.DataArray(
+            [[True], [False], [True], [False], [False]],
+            dims=['time', 'asset'],
+            coords={'time': dates, 'asset': assets}
+        )
+        original = data.copy()
+        
+        op = TsAny(child=Field('dummy'), window=3)
+        result = op.compute(data)
+        
+        # Input unchanged
+        assert (data.values == original.values).all()
+        
+        # Result is different object
+        assert result is not data
+    
+    def test_compute_window_one(self):
+        """Test window=1 (identity for boolean)."""
+        from alpha_canvas.ops.timeseries import TsAny
+        from alpha_canvas.core.expression import Field
+        
+        dates = pd.date_range('2025-01-01', periods=4, freq='D')
+        assets = ['A']
+        
+        data = xr.DataArray(
+            [[True], [False], [True], [False]],
+            dims=['time', 'asset'],
+            coords={'time': dates, 'asset': assets}
+        )
+        
+        op = TsAny(child=Field('dummy'), window=1)
+        result = op.compute(data)
+        
+        # Window=1 with min_periods=1 should be identity for boolean
+        assert result.values[0, 0] == True
+        assert result.values[1, 0] == False
+        assert result.values[2, 0] == True
+        assert result.values[3, 0] == False
+    
+    def test_compute_multiple_assets(self):
+        """Test with multiple assets (cross-sectional independence)."""
+        from alpha_canvas.ops.timeseries import TsAny
+        from alpha_canvas.core.expression import Field
+        
+        dates = pd.date_range('2025-01-01', periods=5, freq='D')
+        assets = ['A', 'B']
+        
+        # A: [T, F, F, F, F] → any in window=3: [NaN, NaN, T, F, F]
+        #     idx 2: window=[0,1,2] → [T,F,F] → T
+        #     idx 3: window=[1,2,3] → [F,F,F] → F
+        #     idx 4: window=[2,3,4] → [F,F,F] → F
+        # B: [F, F, T, F, F] → any in window=3: [NaN, NaN, T, T, T]
+        #     idx 2: window=[0,1,2] → [F,F,T] → T
+        #     idx 3: window=[1,2,3] → [F,T,F] → T
+        #     idx 4: window=[2,3,4] → [T,F,F] → T
+        data = xr.DataArray(
+            [[True, False], [False, False], [False, True], [False, False], [False, False]],
+            dims=['time', 'asset'],
+            coords={'time': dates, 'asset': assets}
+        )
+        
+        op = TsAny(child=Field('dummy'), window=3)
+        result = op.compute(data)
+        
+        # Asset A
+        assert np.isnan(result.values[0, 0])
+        assert np.isnan(result.values[1, 0])
+        assert result.values[2, 0] == True   # Window [0,1,2]: has True at idx 0
+        assert result.values[3, 0] == False  # Window [1,2,3]: no True
+        assert result.values[4, 0] == False  # Window [2,3,4]: no True
+        
+        # Asset B
+        assert np.isnan(result.values[0, 1])
+        assert np.isnan(result.values[1, 1])
+        assert result.values[2, 1] == True   # Has True at idx 2
+        assert result.values[3, 1] == True   # Had True at idx 2
+        assert result.values[4, 1] == True   # Had True at idx 2
+    
+    def test_compute_all_false(self):
+        """Test window with all False values."""
+        from alpha_canvas.ops.timeseries import TsAny
+        from alpha_canvas.core.expression import Field
+        
+        dates = pd.date_range('2025-01-01', periods=5, freq='D')
+        assets = ['A']
+        
+        data = xr.DataArray(
+            [[False], [False], [False], [False], [False]],
+            dims=['time', 'asset'],
+            coords={'time': dates, 'asset': assets}
+        )
+        
+        op = TsAny(child=Field('dummy'), window=3)
+        result = op.compute(data)
+        
+        # Should be False after window is full
+        assert np.isnan(result.values[0, 0])
+        assert np.isnan(result.values[1, 0])
+        assert result.values[2, 0] == False
+        assert result.values[3, 0] == False
+        assert result.values[4, 0] == False
+    
+    def test_compute_all_true(self):
+        """Test window with all True values."""
+        from alpha_canvas.ops.timeseries import TsAny
+        from alpha_canvas.core.expression import Field
+        
+        dates = pd.date_range('2025-01-01', periods=5, freq='D')
+        assets = ['A']
+        
+        data = xr.DataArray(
+            [[True], [True], [True], [True], [True]],
+            dims=['time', 'asset'],
+            coords={'time': dates, 'asset': assets}
+        )
+        
+        op = TsAny(child=Field('dummy'), window=3)
+        result = op.compute(data)
+        
+        # Should be True after window is full
+        assert np.isnan(result.values[0, 0])
+        assert np.isnan(result.values[1, 0])
+        assert result.values[2, 0] == True
+        assert result.values[3, 0] == True
+        assert result.values[4, 0] == True
+
+
+class TestTsAnyIntegration:
+    """Test TsAny operator with Visitor (integration tests)."""
+    
+    def test_ts_any_with_visitor(self):
+        """Test TsAny evaluation through visitor."""
+        from alpha_canvas.ops.timeseries import TsAny
+        from alpha_canvas.core.expression import Field
+        from alpha_canvas.core.visitor import EvaluateVisitor
+        
+        dates = pd.date_range('2025-01-01', periods=5, freq='D')
+        assets = ['A', 'B']
+        
+        # Create boolean field
+        bool_data = xr.DataArray(
+            [[True, False], [False, False], [False, True], [True, False], [False, False]],
+            dims=['time', 'asset'],
+            coords={'time': dates, 'asset': assets}
+        )
+        ds = xr.Dataset({'condition': bool_data})
+        
+        # Create expression: ts_any(Field('condition'), 3)
+        expr = TsAny(child=Field('condition'), window=3)
+        
+        # Evaluate
+        visitor = EvaluateVisitor(ds)
+        result = visitor.evaluate(expr)
+        
+        # Check result
+        assert isinstance(result, xr.DataArray)
+        assert result.shape == (5, 2)
+        
+        # Check some values
+        assert np.isnan(result.values[0, 0])  # Not enough data
+        assert result.values[2, 0] == True    # Had True in window
+

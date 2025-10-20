@@ -180,6 +180,34 @@ class EvaluateVisitor:
         
         return result
     
+    def visit_ts_any(self, node: 'TsAny') -> xr.DataArray:
+        """Visit TsAny node: orchestrate traversal and caching.
+        
+        Visitor's role (3-step pattern):
+        1. Traverse tree (evaluate child)
+        2. Delegate computation to operator
+        3. Cache result
+        
+        The computation logic resides in TsAny.compute(), not here.
+        This follows the Separation of Concerns principle.
+        
+        Args:
+            node: TsAny expression node
+        
+        Returns:
+            Boolean DataArray indicating if any value in window is True
+        """
+        # 1. Traversal: evaluate child expression
+        child_result = node.child.accept(self)
+        
+        # 2. Delegation: operator does its own computation
+        result = node.compute(child_result)
+        
+        # 3. State collection: cache result with step counter
+        self._cache_result("TsAny", result)
+        
+        return result
+    
     def _cache_result(self, name: str, result: xr.DataArray):
         """Cache result with current step number.
         

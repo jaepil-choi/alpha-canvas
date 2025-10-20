@@ -4,6 +4,112 @@ This document records critical discoveries from experiments, including what work
 
 ---
 
+## Phase 8: ts_any() Operator
+
+### Experiment 11: Rolling Boolean Window Operations
+
+**Date**: 2025-01-20  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated rolling boolean operations for `ts_any()` operator. The `rolling().sum() > 0` approach is 3.92x faster than `reduce(any)` and provides clearer semantics.
+
+#### Key Discoveries
+
+1. **Optimal Implementation Pattern**
+   - **Pattern**: `rolling(time=window, min_periods=window).sum() > 0`
+   - **Performance**: 12ms vs 47ms for reduce(any) on (500, 100) data
+   - **Speedup**: 3.92x faster (291.7% improvement)
+   - **Clarity**: "count > 0 means any" is intuitive
+
+2. **Boolean Operations on xarray**
+   - Boolean DataArrays work seamlessly with rolling operations
+   - `.sum()` on boolean arrays counts True values
+   - Converting sum > 0 back to boolean is trivial
+   - No special handling needed for boolean dtype
+
+3. **NaN Handling Difference**
+   - **sum > 0 approach**: NaN → 0.0 → False (practical)
+   - **reduce(any) approach**: NaN → NaN (mathematically pure)
+   - **Decision**: Use sum > 0 approach (False is more useful than NaN for "any" check)
+   - **Rationale**: If data is missing, we can't confirm "any", so False is appropriate
+
+4. **Window Persistence Verified**
+   - Events remain visible for exactly `window` days
+   - Example: Surge on day 2 visible through days 2-6 with window=5
+   - Day 7 no longer sees day 2's event (correctly out of window)
+
+5. **Cross-Sectional Independence**
+   - Each asset tracks its own events independently
+   - AAPL surge does not affect NVDA or MSFT
+   - Boolean masks work correctly across the asset dimension
+
+#### Implementation Pattern
+
+```python
+class TsAny(Expression):
+    child: Expression
+    window: int
+    
+    def compute(self, child_result: xr.DataArray) -> xr.DataArray:
+        """
+        Check if any value in rolling window is True.
+        
+        Strategy: rolling().sum() counts True values,
+        then > 0 converts to boolean 'any' check.
+        """
+        # child_result is already boolean DataArray
+        count_true = child_result.rolling(
+            time=self.window,
+            min_periods=self.window
+        ).sum()
+        
+        # Any True in window? (count > 0)
+        return count_true > 0
+```
+
+#### Performance Evidence
+
+```
+Small dataset (10, 3):
+- sum > 0: 14ms
+- reduce(any): 8ms  (comparable)
+
+Large dataset (500, 100):
+- sum > 0: 12ms  ← Winner!
+- reduce(any): 47ms
+```
+
+#### Use Cases Validated
+
+1. **Surge Event Detection**
+   - `ts_any(returns > 0.03, window=5)` → Had >3% return in last 5 days
+   - Practical for event-driven signals
+
+2. **Threshold Crossing**
+   - `ts_any(volume > 2*avg_volume, window=10)` → High volume event
+   - Useful for liquidity filters
+
+3. **Condition Monitoring**
+   - `ts_any(price < stop_loss, window=1)` → Stop loss triggered
+   - Can combine multiple conditions
+
+#### Lessons Learned
+
+1. **Simplest Solution Wins**
+   - `sum() > 0` is faster AND clearer than `reduce(any)`
+   - Don't overcomplicate with functional programming when simple arithmetic works
+
+2. **NaN Pragmatism**
+   - Mathematical purity (NaN → NaN) isn't always practical
+   - False for "can't determine any" is more useful in trading context
+
+3. **xarray Rolling is Powerful**
+   - Works seamlessly with boolean data
+   - min_periods ensures consistent NaN handling
+   - Performance scales well to large datasets
+
+---
+
 ## Phase 1: Config Module
 
 ### Experiment 01: YAML Config Loading
