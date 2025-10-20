@@ -241,3 +241,4 @@ All follow same structure:
 2. Visitor with 3-step pattern (traverse, delegate, cache)
 3. Direct tests for `compute()` + integration tests
 
+
