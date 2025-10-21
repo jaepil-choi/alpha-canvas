@@ -37,7 +37,7 @@ flowchart TD
     Ind --> Canvas["시그널 캔버스 생성"]
     Dep --> Canvas
     
-    Canvas --> Select["셀렉터로 마스크 생성<br/>rc.axis.size['small']"]
+    Canvas --> Select["비교로 마스크 생성<br/>rc.data['size'] == 'small'"]
     Select --> Assign["NumPy-style 할당<br/>rc[mask] = 1.0"]
     Assign --> PnL["PnL 추적<br/>rc.trace_pnl"]
     PnL --> Compare{"성과 비교"}
@@ -186,8 +186,8 @@ rc.add_data('ret', Field('return'))
 rc.add_data('size', cs_quantile(rc.data.mcap, bins=2, labels=['small', 'big']))
 rc.add_data('surge_event', ts_any(rc.data.ret > 0.3, window=504))
 
-# 4. "셀렉터"로 (T, N) 불리언 마스크 생성 
-mask_long = (rc.axis.size['small'] & rc.axis.surge_event)
+# 4. "비교 연산"으로 (T, N) 불리언 마스크 생성 
+mask_long = (rc.data['size'] == 'small') & (rc.data['surge_event'] == True)
 
 # 5. "Numpy-style 할당" (rc[mask] = 1.0)
 rc[mask_long] = 1.0  
@@ -245,8 +245,8 @@ rc.add_data('value', cs_quantile(rc.data.btm, bins=3, labels=['low', 'mid', 'hig
 
 # 2. Small-Value 포트폴리오 구성
 rc.init_signal_canvas('smb')
-rc[rc.axis.size['small']] = 1.0   # Long small stocks
-rc[rc.axis.size['big']] = -1.0    # Short big stocks
+rc[rc.data['size'] == 'small'] = 1.0   # Long small stocks
+rc[rc.data['size'] == 'big'] = -1.0    # Short big stocks
 
 # 3. 팩터 수익률 계산
 smb_returns = rc.trace_pnl('smb')
@@ -268,8 +268,8 @@ rc.add_data('value', cs_quantile(rc.data.btm, bins=3, labels=['low', 'mid', 'hig
 
 # 3. HML 포트폴리오 구성 (각 Size 그룹 내에서 High-Low)
 rc.init_signal_canvas('hml')
-rc[rc.axis.value['high']] = 1.0   # Long high B/M (value stocks)
-rc[rc.axis.value['low']] = -1.0   # Short low B/M (growth stocks)
+rc[rc.data['value'] == 'high'] = 1.0   # Long high B/M (value stocks)
+rc[rc.data['value'] == 'low'] = -1.0   # Short low B/M (growth stocks)
 
 # 4. 팩터 수익률 계산
 hml_returns = rc.trace_pnl('hml')
