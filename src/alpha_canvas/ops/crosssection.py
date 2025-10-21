@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 from alpha_canvas.core.expression import Expression
 import numpy as np
+import xarray as xr
 from scipy.stats import rankdata
 
 
-@dataclass
+@dataclass(eq=False)  # Disable dataclass __eq__ to use Expression operators
 class Rank(Expression):
     """Cross-sectional percentile ranking operator.
     

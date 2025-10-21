@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from alpha_canvas.core.expression import Expression
 
 
-@dataclass
+@dataclass(eq=False)  # Disable dataclass __eq__ to use Expression operators
 class TsMean(Expression):
     """Rolling time-series mean operator.
     
@@ -75,7 +75,7 @@ class TsMean(Expression):
         ).mean()
 
 
-@dataclass
+@dataclass(eq=False)  # Disable dataclass __eq__ to use Expression operators
 class TsAny(Expression):
     """Rolling time-series any operator.
     
