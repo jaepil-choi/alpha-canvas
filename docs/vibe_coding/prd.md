@@ -171,7 +171,7 @@ rc.add_data_var('alpha1', alpha_expr)
 
 * **인터페이스 B: 셀렉터 인터페이스 (Numpy-style)**
 
-  * **요구사항:** (핵심 문제 2 해결) "가상의 축"(Axis 룰)을 동적으로 정의하고, `numpy`처럼 불리언 마스크를 생성하여 최종 시그널 캔버스에 값을 할당할 수 있어야 합니다.
+  * **요구사항:** (핵심 문제 2 해결) 분류 데이터(categorical labels)를 정의하고, `numpy`처럼 불리언 마스크를 생성하여 최종 시그널 캔버스에 값을 할당할 수 있어야 합니다.
   * **시나리오:**
 
 ```python
@@ -182,9 +182,9 @@ rc.init_signal_canvas('my_alpha')
 rc.add_data('mcap', Field('market_cap'))
 rc.add_data('ret', Field('return'))
 
-# 3. "가상 축(Axis) 룰" 동적 등록
-rc.add_data('size', cs_quantile(rc.data.mcap, bins=2, labels=['small', 'big']))
-rc.add_data('surge_event', ts_any(rc.data.ret > 0.3, window=504))
+# 3. 분류 데이터(categorical labels) 생성
+rc.add_data('size', cs_quantile(rc.data['mcap'], bins=2, labels=['small', 'big']))
+rc.add_data('surge_event', ts_any(rc.data['ret'] > 0.3, window=504))
 
 # 4. "비교 연산"으로 (T, N) 불리언 마스크 생성 
 mask_long = (rc.data['size'] == 'small') & (rc.data['surge_event'] == True)
@@ -234,14 +234,14 @@ rc[mask_long] = 1.0
 
 * **시나리오 1: 독립 이중 정렬 (Independent Double Sort)**
     1. 사용자가 두 개의 팩터(Size, Value)를 정의합니다.
-    2. 각 팩터를 **독립적으로** 버킷화(quantile)하여 축(axis)으로 등록합니다.
+    2. 각 팩터를 **독립적으로** 버킷화(quantile)하여 등록합니다.
     3. 셀렉터 인터페이스를 사용하여 다차원 교차 선택을 수행합니다.
     4. 예시: Fama-French SMB (Small Minus Big) 팩터
 
 ```python
 # 1. 독립 정렬: 전체 유니버스에서 각각 quantile 계산
-rc.add_data('size', cs_quantile(rc.data.mcap, bins=2, labels=['small', 'big']))
-rc.add_data('value', cs_quantile(rc.data.btm, bins=3, labels=['low', 'mid', 'high']))
+rc.add_data('size', cs_quantile(rc.data['mcap'], bins=2, labels=['small', 'big']))
+rc.add_data('value', cs_quantile(rc.data['btm'], bins=3, labels=['low', 'mid', 'high']))
 
 # 2. Small-Value 포트폴리오 구성
 rc.init_signal_canvas('smb')
@@ -260,10 +260,10 @@ smb_returns = rc.trace_pnl('smb')
 
 ```python
 # 1. 첫 번째 정렬: Size
-rc.add_data('size', cs_quantile(rc.data.mcap, bins=2, labels=['small', 'big']))
+rc.add_data('size', cs_quantile(rc.data['mcap'], bins=2, labels=['small', 'big']))
 
 # 2. 종속 정렬: 각 Size 그룹 내에서 Value quantile 계산
-rc.add_data('value', cs_quantile(rc.data.btm, bins=3, labels=['low', 'mid', 'high'],
+rc.add_data('value', cs_quantile(rc.data['btm'], bins=3, labels=['low', 'mid', 'high'],
                                    group_by='size'))
 
 # 3. HML 포트폴리오 구성 (각 Size 그룹 내에서 High-Low)
@@ -281,8 +281,8 @@ hml_returns = rc.trace_pnl('hml')
 
 ```python
 # 유동성이 충분한 종목들만 대상으로 모멘텀 quantile 계산
-high_liquidity_mask = rc.data.volume > rc.data.volume.quantile(0.5)
-rc.add_data('momentum', cs_quantile(rc.data.returns, bins=5, labels=['q1','q2','q3','q4','q5'],
+high_liquidity_mask = rc.data['volume'] > rc.data['volume'].quantile(0.5)
+rc.add_data('momentum', cs_quantile(rc.data['returns'], bins=5, labels=['q1','q2','q3','q4','q5'],
                                       mask=high_liquidity_mask))
 ```
 
@@ -306,14 +306,14 @@ rc.add_data('momentum', cs_quantile(rc.data.returns, bins=5, labels=['q1','q2','
 rc = AlphaCanvas(
     start_date='2024-01-01',
     end_date='2024-12-31',
-    universe=rc.data.price > 5.0  # 페니스톡 제외
+    universe=rc.data['price'] > 5.0  # 페니스톡 제외
 )
 
 # 시나리오 2: 복합 조건 유니버스
 universe_mask = (
-    (rc.data.price > 5.0) &
-    (rc.data.volume > 100000) &
-    (rc.data.market_cap > 1e9)
+    (rc.data['price'] > 5.0) &
+    (rc.data['volume'] > 100000) &
+    (rc.data['market_cap'] > 1e9)
 )
 rc = AlphaCanvas(..., universe=universe_mask)
 
