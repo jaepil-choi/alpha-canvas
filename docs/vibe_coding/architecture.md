@@ -398,22 +398,42 @@ Parquet File (Long Format)
 
 ---
 
-### 📋 **F2 (셀렉터 인터페이스) - PLANNED**
+### 🔨 **F2 (셀렉터 인터페이스) - PARTIAL**
 
-**상태**: 설계 완료, 구현 예정
+**상태**: Phase 7B 완료 (DataAccessor), Phase 7A 완료 (Boolean Expressions)
 
-1. `rc.add_data('size', cs_quantile(rc.data.mcap, ...))` 호출 시, `rc`는 이 `cs_quantile` `Expression` 객체를 `rc.rules['size']`에 등록합니다.
-2. `rc._evaluator`가 `Expression`을 평가하여 `(T, N)` 레이블 배열을 생성하고, `rc.db = rc.db.assign({'size': result})`로 `data_vars`에 추가합니다.
-3. 사용자가 `mask = rc.axis.size['small']`을 호출합니다.
-4. `rc.axis` accessor는 이를 `(rc.db['size'] == 'small')`이라는 표준 `xarray` 불리언 인덱싱으로 변환합니다.
-5. `(T, N)` 불리언 마스크가 반환됩니다.
-6. 사용자가 `rc[mask] = 1.0`을 호출하면, `rc`는 `rc.db['my_alpha']` 캔버스에 `xr.where`를 사용하여 값을 할당(overwrite)합니다.
+**✅ 구현 완료**:
+- ✅ `rc.data` DataAccessor: Expression-based field access
+- ✅ Boolean Expression infrastructure: `==`, `!=`, `<`, `>`, `<=`, `>=`, `&`, `|`, `~`
+- ✅ Lazy evaluation with universe masking through Visitor
 
-**구현 필요 사항**:
-- [ ] `cs_quantile` 연산자
-- [ ] `AxisAccessor` 및 `AxisSelector`
-- [ ] `rc[mask] = value` 할당 로직
-- [ ] `init_signal_canvas()` 메서드
+**사용 패턴**:
+
+1. **필드 접근**: `rc.data['size']` → `Field('size')` Expression (lazy)
+2. **비교 생성**: `rc.data['size'] == 'small'` → `Equals` Expression (lazy)
+3. **논리 연산**: `(rc.data['size'] == 'small') & (rc.data['momentum'] == 'high')` → `And` Expression
+4. **평가**: `rc.evaluate(mask)` → boolean DataArray with universe masking
+
+**예시**:
+
+```python
+# 기본 선택
+small_mask = rc.data['size'] == 'small'
+result = rc.evaluate(small_mask)
+
+# 복합 선택 (Fama-French style)
+ff_mask = (rc.data['size'] == 'small') & (rc.data['value'] == 'high')
+result = rc.evaluate(ff_mask)
+
+# 수치 비교
+penny_stocks = rc.data['price'] < 5.0
+result = rc.evaluate(penny_stocks)
+```
+
+**📋 아직 구현 필요**:
+- [ ] `cs_quantile` 연산자 (Phase 7C)
+- [ ] `rc[mask] = value` 할당 로직 (Phase 7D)
+- [ ] `init_signal_canvas()` 메서드 (Phase 7D)
 
 ---
 
