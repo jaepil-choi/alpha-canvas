@@ -12,6 +12,11 @@ poetry run python showcase/02_datapanel_model.py
 poetry run python showcase/03_expression_visitor.py
 poetry run python showcase/04_facade_complete.py
 poetry run python showcase/05_parquet_data_loading.py
+poetry run python showcase/06_ts_mean_operator.py
+poetry run python showcase/07_ts_any_surge_detection.py
+poetry run python showcase/08_rank_market_cap.py
+poetry run python showcase/09_universe_masking.py
+poetry run python showcase/10_boolean_expressions.py
 ```
 
 Or run all showcases in sequence:
@@ -82,6 +87,53 @@ poetry run python showcase/run_all.py
 
 **Key Features**: TsMean operator, polymorphic time-series design, Expression/Visitor pattern, step caching
 
+### 07. Time-Series Operator - ts_any() (`07_ts_any_surge_detection.py`)
+- Event detection with rolling boolean windows
+- Rolling sum > 0 pattern for "any True in window"
+- Surge detection (returns > threshold)
+- Cross-sectional independence
+- Window persistence verification
+- Performance benchmarking
+- Real-world event tracking scenarios
+
+**Key Features**: TsAny operator, boolean window operations, event detection patterns, rolling.sum() optimization
+
+### 08. Cross-Sectional Operator - rank() (`08_rank_market_cap.py`)
+- Percentile ranking across assets (cross-sectional)
+- Ascending rank (0.0 = smallest, 1.0 = largest)
+- NaN handling with scipy.stats.rankdata
+- Time independence verification
+- Integration with Field and Visitor
+- Market cap ranking example
+- Multiple time steps analysis
+
+**Key Features**: Rank operator, scipy integration, cross-sectional operations, ordinal ranking, percentile conversion
+
+### 09. Universe Masking (`09_universe_masking.py`)
+- Investable universe definition
+- Automatic universe masking (double masking strategy)
+- Input masking at Field retrieval
+- Output masking at operator results
+- Idempotent masking verification
+- Time-varying universe (delisting scenario)
+- Open Toolkit integration (injected data also masked)
+- Universe coverage statistics
+- Edge cases (penny stocks, illiquid stocks)
+
+**Key Features**: Universe masking, double masking trust chain, immutable universe, xarray.where() pattern, realistic penny stock scenario
+
+### 10. Boolean Expressions (`10_boolean_expressions.py`)
+- Comparison operators creating Expressions (==, !=, <, >, <=, >=)
+- Logical operators combining Expressions (&, |, ~)
+- Lazy evaluation (Expressions created, not evaluated)
+- Evaluation through EvaluateVisitor (Visitor-based, not standalone)
+- Universe masking applied automatically
+- String and numeric comparisons
+- Chained boolean logic
+- Visitor step caching for all Expression types
+
+**Key Features**: Boolean Expression operators, lazy comparison, Visitor pattern integration, Expression-based selector foundation
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:
@@ -95,11 +147,14 @@ All showcases should complete with `[SUCCESS]` verdicts, demonstrating that the 
 ## Foundation Test Results
 
 The complete MVP foundation has:
-- ✅ **53 tests passing** (100% success rate)
-- ✅ **8 experiments validated** (all SUCCESS)
-- ✅ **5 phases complete** (Config, DataPanel, Expression, Facade, Parquet Data Loading)
+- ✅ **100 tests passing** (100% success rate)
+- ✅ **14 experiments validated** (all SUCCESS)
+- ✅ **11 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions
 - ✅ **Production-ready** architecture (Facade, Composite, Visitor patterns)
 - ✅ **Data pipeline**: Parquet → DuckDB → xarray → AlphaCanvas (~5.38ms per field)
+- ✅ **Operator library**: TsMean, TsAny, Rank, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
+- ✅ **Universe masking**: Automatic double-masking with 13.6% overhead
+- ✅ **Boolean Expressions**: Lazy evaluation with Expression-based comparisons
 
 ---
 
