@@ -55,6 +55,7 @@ rc = AlphaCanvas(config_dir='./custom_config')
 ```
 
 **구현 요구사항:**
+
 - `AlphaCanvas.__init__()` 내부에서 `ConfigLoader`를 생성하고 `config/` 디렉토리의 모든 `.yaml` 파일을 로드합니다.
 - `ConfigLoader`는 `data.yaml`, `db.yaml` 등을 각각 파싱하여 내부 dict에 저장합니다.
 
@@ -82,6 +83,7 @@ def add_data(self, name: str, data: Union[Expression, xr.DataArray]) -> None:
 ```
 
 **핵심 사항:**
+
 - `xarray.Dataset.assign()`을 사용하여 Data Variable로 추가
 - `Expression`과 `DataArray` 모두 지원 (오버로딩)
 - Open Toolkit 철학: 외부 계산 결과를 seamlessly inject
@@ -96,6 +98,7 @@ def db(self) -> xr.Dataset:
 ```
 
 **핵심 사항:**
+
 - 래핑 없이 순수 `xarray.Dataset` 반환
 - 사용자는 `pure_ds = rc.db`로 꺼내서 scipy/statsmodels 사용 가능
 
@@ -123,6 +126,7 @@ class AxisSelector:
 ```
 
 **핵심 사항:**
+
 - `rc.axis.size['small']`은 단순한 syntactic sugar
 - 실제로는 `(rc.db['size'] == 'small')`이라는 표준 xarray 연산
 - 별도의 Expression 생성 없이 즉시 Boolean mask 반환
@@ -190,7 +194,7 @@ my_alpha = rc.data.my_alpha  # xarray.DataArray (T, N)
 **구현 요구사항:**
 
 - `rc.add_data('size', expr)`: Expression을 평가하고 `rc.db.assign({'size': result})`로 data_vars에 추가
-- `rc.axis.size['small']`: 
+- `rc.axis.size['small']`:
   1. `AxisAccessor`가 `rc.db['size']`에 접근
   2. `AxisSelector.__getitem__('small')`이 `(rc.db['size'] == 'small')`을 반환
   3. 표준 xarray 불리언 인덱싱, Expression 생성 없음
@@ -368,6 +372,7 @@ multi_returns = rc.trace_pnl('multi_factor')
 **핵심 원칙:** 연산자는 자신의 계산 로직을 소유하고, Visitor는 순회 및 캐싱만 담당합니다.
 
 **잘못된 패턴 (Anti-Pattern):**
+
 ```python
 # ❌ BAD: Visitor가 계산 로직을 포함
 class EvaluateVisitor:
@@ -380,6 +385,7 @@ class EvaluateVisitor:
 ```
 
 **올바른 패턴 (Correct Pattern):**
+
 ```python
 # ✅ GOOD: 연산자가 계산 로직을 소유
 @dataclass
@@ -458,6 +464,7 @@ class OperatorName(Expression):
 ```
 
 **체크리스트:**
+
 - [ ] `accept()` 메서드: Visitor 인터페이스 제공
 - [ ] `compute()` 메서드: 핵심 계산 로직 캡슐화
 - [ ] `compute()`는 순수 함수 (부작용 없음)
@@ -492,6 +499,7 @@ def visit_operator_name(self, node: OperatorName) -> xr.DataArray:
 ```
 
 **Visitor의 역할:**
+
 - ✅ **트리 순회:** 깊이 우선으로 자식 노드 방문
 - ✅ **계산 위임:** `node.compute()`로 계산 맡김
 - ✅ **상태 수집:** 중간 결과를 정수 스텝으로 캐싱
@@ -760,6 +768,7 @@ class AxisSelector:
 ### 3.8.1. Step 인덱싱 변경사항
 
 **이전 (문자열 기반):**
+
 ```python
 # ❌ 사용하지 마세요
 rc.trace_pnl('alpha1', step='ts_mean')
@@ -767,6 +776,7 @@ rc.get_intermediate('alpha1', step='ts_mean')
 ```
 
 **현재 (정수 기반):**
+
 ```python
 # ✅ 올바른 사용법
 rc.trace_pnl('alpha1', step=1)  # step 1까지 추적
@@ -780,12 +790,14 @@ rc.trace_pnl('alpha1')  # step=None (기본값)
 ### 3.8.2. 독립/종속 정렬 패턴
 
 **독립 정렬 (변경 없음):**
+
 ```python
 # ✅ 기존과 동일하게 작동
 rc.add_axis('size', cs_quantile(rc.data.mcap, bins=2, labels=['small','big']))
 ```
 
 **종속 정렬 (신규 기능):**
+
 ```python
 # ✅ 새로운 기능
 rc.add_axis('value', cs_quantile(rc.data.btm, bins=3, labels=['low','mid','high'],
@@ -793,6 +805,7 @@ rc.add_axis('value', cs_quantile(rc.data.btm, bins=3, labels=['low','mid','high'
 ```
 
 **마스크 기반 필터링 (신규 기능):**
+
 ```python
 # ✅ 새로운 기능
 mask = rc.data.volume > threshold
@@ -805,6 +818,7 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ### 3.9.1. Step 인덱싱 검증
 
 ✅ **필수 동작:**
+
 - `rc.trace_pnl('alpha', step=2)` → step 2까지의 PnL 반환
 - `rc.get_intermediate('alpha', step=2)` → step 2의 캐시된 DataArray 반환
 - 병렬 Expression (브랜치가 있는 트리)에서 올바른 순서로 인덱싱
@@ -813,6 +827,7 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ### 3.9.2. 종속 정렬 검증
 
 ✅ **필수 동작:**
+
 - **독립 정렬**: `cs_quantile(...)` → 전체 유니버스 대상 quantile
 - **종속 정렬**: `cs_quantile(..., group_by='axis')` → 각 그룹 내 quantile
 - **마스크 필터링**: `cs_quantile(..., mask=...)` → 필터링된 부분집합 대상 quantile
@@ -821,6 +836,7 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ### 3.9.3. Fama-French 재현 검증
 
 ✅ **필수 동작:**
+
 - SMB (독립 2×3 정렬) → 예상된 포트폴리오 가중치 생성
 - HML (종속 2×3 정렬) → 예상된 포트폴리오 가중치 생성
 - 독립/종속 방식의 cutoff 차이 검증 (academic paper 기준과 일치)
@@ -828,28 +844,33 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ## 3.10. 다음 단계
 
 ### Phase 1: 핵심 컴포넌트 구현
+
 - [ ] `Expression` 추상 클래스 및 Leaf/Composite 구현
 - [ ] `EvaluateVisitor` 기본 구조 및 캐싱 메커니즘 (정수 step 카운터 포함)
 - [ ] `ConfigLoader` 및 YAML 파싱
 - [ ] `AlphaCanvas` Facade 기본 구조
 
 ### Phase 2: 연산자 구현
+
 - [ ] Timeseries 연산자 (`ts_mean`, `ts_sum`, etc.)
 - [ ] Cross-sectional 연산자 (`cs_rank`, `cs_quantile` with `group_by` and `mask`)
 - [ ] Transform 연산자 (`group_neutralize`, etc.)
 
 ### Phase 3: 추적성 및 분석
+
 - [ ] `PnLTracer` 구현
 - [ ] 선택적 단계 추적 로직 (정수 인덱스 기반)
 - [ ] 성과 지표 계산
 - [ ] PnL 리포트에 step 메타데이터 표시
 
 ### Phase 4: 인터페이스 완성
+
 - [ ] Property accessor (`rc.data`, `rc.axis`)
 - [ ] NumPy-style 할당 (`rc[mask] = value`)
 - [ ] 헬퍼 메서드 (`rc.ts_mean()` 등)
 
 ### Phase 5: 검증 및 테스트
+
 - [ ] 정수 step 인덱싱 단위 테스트
 - [ ] `_quantile_grouped` 로직 단위 테스트
 - [ ] Fama-French SMB/HML 통합 테스트
@@ -858,4 +879,3 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ---
 
 **참고:** 이 문서는 실제 구현 과정에서 발견되는 새로운 패턴과 교훈을 지속적으로 반영해야 합니다 (Living Document).
-
