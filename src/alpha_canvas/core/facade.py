@@ -14,6 +14,7 @@ from .data_model import DataPanel
 from .expression import Expression
 from .visitor import EvaluateVisitor
 from .data_loader import DataLoader
+from alpha_canvas.utils import DataAccessor
 
 
 class AlphaCanvas:
@@ -124,6 +125,9 @@ class AlphaCanvas:
         # Storage for Expression rules
         self.rules = {}
         
+        # Initialize DataAccessor for rc.data property
+        self._data_accessor = DataAccessor()
+        
         # Initialize universe mask (immutable once set)
         self._universe_mask: Optional[xr.DataArray] = None
         if universe is not None:
@@ -199,6 +203,43 @@ class AlphaCanvas:
             >>> rc.add_data('beta', betas)
         """
         return self._panel.db
+    
+    @property
+    def data(self) -> DataAccessor:
+        """Access data fields as Field Expressions.
+        
+        This property provides Expression-based data access through the DataAccessor.
+        All field accesses return Field Expressions that remain lazy until explicitly
+        evaluated, ensuring universe masking is applied through the Visitor pattern.
+        
+        Returns:
+            DataAccessor instance for field access
+            
+        Note:
+            Only item access (rc.data['field']) is supported.
+            Attribute access (rc.data.field) will raise AttributeError.
+        
+        Example:
+            >>> # Returns Field('size') Expression
+            >>> size_field = rc.data['size']
+            >>> isinstance(size_field, Field)
+            True
+            
+            >>> # Returns Equals Expression (lazy)
+            >>> mask = rc.data['size'] == 'small'
+            >>> isinstance(mask, Expression)
+            True
+            
+            >>> # Evaluate with universe masking
+            >>> result = rc.evaluate(mask)
+            >>> isinstance(result, xr.DataArray)
+            True
+            
+            >>> # Complex logical chains
+            >>> complex_mask = (rc.data['size'] == 'small') & (rc.data['momentum'] == 'high')
+            >>> result = rc.evaluate(complex_mask)
+        """
+        return self._data_accessor
     
     def add_data(self, name: str, data: Union[xr.DataArray, Expression]):
         """Add data variable (DataArray or Expression).
