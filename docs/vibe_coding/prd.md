@@ -6,7 +6,63 @@
 * **목표:** 퀀트 리서처가 Python 네이티브 환경에서 복잡한 알파 아이디어를 빠르고 직관적으로 테스트하고, 그 과정을 투명하게 추적할 수 있는 차세대 리서치 플랫폼을 제공합니다.
 * **비전:** 데이터 검색부터 팩터 생성, PnL 분석까지의 전 과정을 통합된 단일 인터페이스(`rc`)로 제공하여, 팩터 수익률(factor return) 계산을 포함한 아이디어의 프로토타이핑 속도를 획기적으로 단축시킵니다. MVP(Minimum Viable Product)는 `(T, N)` `DataPanel` 모델을 중심으로 팩터(Alpha)를 생성하고 검증하는 경험에 집중합니다. 또한, `alpha-canvas`를 Jupyter 환경과 완벽히 호환되는 **"개방형 툴킷(Open Toolkit)"**으로 제공하여, 기존 리서치 워크플로우에 유연하게 통합될 수 있도록 합니다.
 
-## 1.2. 핵심 문제 (The Problem)
+## 1.2. 사용자 워크플로우 (User Workflows)
+
+### 워크플로우 1: 기본 팩터 생성 및 분석
+
+```mermaid
+flowchart TD
+    Start(["리서처 시작"]) --> Init["AlphaCanvas 초기화<br/>날짜, 유니버스 설정"]
+    Init --> Load["데이터 로드<br/>Field 정의"]
+    Load --> Transform["변환 적용<br/>ts_mean, rank 등"]
+    Transform --> Analyze["결과 분석<br/>rc.db 접근"]
+    Analyze --> Decision{"만족스러운가?"}
+    Decision -->|"No"| Modify["수식 수정"]
+    Modify --> Transform
+    Decision -->|"Yes"| Export["결과 내보내기<br/>Jupyter 활용"]
+    Export --> End(["완료"])
+```
+
+### 워크플로우 2: 다차원 팩터 포트폴리오 구성 (Fama-French)
+
+```mermaid
+flowchart TD
+    Start(["연구 시작"]) --> Init["AlphaCanvas 초기화"]
+    Init --> DefineAxes["축 정의<br/>size, value 등"]
+    DefineAxes --> IndSort{"정렬 방식?"}
+    
+    IndSort -->|"독립 정렬"| Ind["cs_quantile<br/>전체 유니버스 대상"]
+    IndSort -->|"종속 정렬"| Dep["cs_quantile<br/>group_by 지정"]
+    
+    Ind --> Canvas["시그널 캔버스 생성"]
+    Dep --> Canvas
+    
+    Canvas --> Select["셀렉터로 마스크 생성<br/>rc.axis.size['small']"]
+    Select --> Assign["NumPy-style 할당<br/>rc[mask] = 1.0"]
+    Assign --> PnL["PnL 추적<br/>rc.trace_pnl"]
+    PnL --> Compare{"성과 비교"}
+    Compare -->|"개선 필요"| DefineAxes
+    Compare -->|"만족"| End(["완료"])
+```
+
+### 워크플로우 3: 디버깅 및 추적성
+
+```mermaid
+flowchart TD
+    Start(["복잡한 수식 정의"]) --> Execute["Expression 평가"]
+    Execute --> Results["최종 PnL 확인"]
+    Results --> Problem{"문제 발견?"}
+    
+    Problem -->|"No"| End(["완료"])
+    Problem -->|"Yes"| Trace["단계별 추적<br/>trace_pnl step=N"]
+    
+    Trace --> Inspect["중간 데이터 확인<br/>get_intermediate"]
+    Inspect --> Root["근본 원인 파악<br/>어느 단계가 문제?"]
+    Root --> Fix["해당 연산자 수정"]
+    Fix --> Execute
+```
+
+## 1.3. 핵심 문제 (The Problem)
 
 기존 퀀트 리서치 툴(e.g., WorldQuant BRAIN)은 강력하지만 다음과 같은 명확한 한계를 가집니다.
 
@@ -16,7 +72,7 @@
       * 이로 인해 리서처가 **"Small Size이면서 High Value인 그룹"**을 선택하거나, **"Mid Value 그룹은 제외"**하는 등 Fama-French 스타일의 정교한 포트폴리오 구성 및 데이터 조작이 불가능했습니다. 본 PRD는 이 문제를 "셀렉터 인터페이스"로 해결하는 것을 핵심 목표로 합니다.
 3. **결과 중심의 불투명성 (낮은 추적성):** `group_neutralize(ts_mean('returns', 3), ...)`와 같은 복잡한 수식의 최종 PnL만 알 수 있을 뿐, *중간 단계*(`ts_mean` 적용 직후)에서 `NaN`이 발생했는지, 또는 어느 연산이 PnL을 하락시켰는지 추적하기 매우 어렵습니다.
 
-## 1.3. 대상 사용자 (User Persona)
+## 1.4. 대상 사용자 (User Persona)
 
 * **페르소나:** 바이사이드(Buy-side) 퀀트 리서처 / 포트폴리오 매니저
 * **특징:**
@@ -24,7 +80,7 @@
   * 아이디어를 빠르게 프로토타이핑하고 싶어 합니다.
   * 단순히 PnL 결과만 보는 것이 아니라, 수식의 **각 단계별**로 PnL 기여도와 데이터 상태를 투명하게 추적할 수 있기를 원합니다.
 
-## 1.4. 핵심 데이터 모델 (Core Data Model)
+## 1.5. 핵심 데이터 모델 (Core Data Model)
 
 ### MVP: `DataPanel` (T, N)
 
@@ -37,7 +93,7 @@
 * 향후 릴리스에서는 페어 트레이딩(Pair Trading) 및 공분산 분석을 위한 `DataTensor` `(T, N, N)` 모델을 지원하도록 확장합니다.
 * 또한, 롤링 회귀(Rolling Regression) 파라미터(`alpha`, `beta`) 등을 저장하기 위한 `DataEstimates` `(T, N, K)` 모델도 지원 대상입니다.
 
-## 1.5. "개방형 툴킷" (Open Toolkit) 철학
+## 1.6. "개방형 툴킷" (Open Toolkit) 철학
 
 **요구사항:** `alpha-canvas`는 닫힌 시스템(Closed System)이 아닙니다.
 
@@ -61,7 +117,7 @@
   beta_smoothed = rc.ts_mean('beta', 5)
   ```
 
-## 1.6. 주요 기능 요구사항 (Key Features)
+## 1.7. 주요 기능 요구사항 (Key Features)
 
 ### F1: Config 기반 데이터 검색 (Data Retrieval)
 
@@ -229,5 +285,50 @@ high_liquidity_mask = rc.data.volume > rc.data.volume.quantile(0.5)
 rc.add_data('momentum', cs_quantile(rc.data.returns, bins=5, labels=['q1','q2','q3','q4','q5'],
                                       mask=high_liquidity_mask))
 ```
+
+## 1.8. 유니버스 정의 (Universe Definition)
+
+### 개념
+
+**투자 가능 유니버스(Investable Universe)**는 백테스트에서 실제로 거래 가능한 종목의 집합을 정의합니다.
+
+### 요구사항
+
+* **초기화 시 설정**: `AlphaCanvas` 초기화 시 한 번 설정되며 세션 동안 불변
+* **자동 적용**: 모든 데이터 검색과 연산 결과에 자동으로 적용
+* **불리언 마스크**: `(T, N)` 형태의 불리언 DataArray로 표현
+* **NaN 처리**: 유니버스 밖 종목은 모든 연산에서 NaN으로 처리
+
+### 사용 시나리오
+
+```python
+# 시나리오 1: 간단한 가격 기반 유니버스
+rc = AlphaCanvas(
+    start_date='2024-01-01',
+    end_date='2024-12-31',
+    universe=rc.data.price > 5.0  # 페니스톡 제외
+)
+
+# 시나리오 2: 복합 조건 유니버스
+universe_mask = (
+    (rc.data.price > 5.0) &
+    (rc.data.volume > 100000) &
+    (rc.data.market_cap > 1e9)
+)
+rc = AlphaCanvas(..., universe=universe_mask)
+
+# 시나리오 3: 데이터베이스 기반 유니버스 (미래 확장)
+rc = AlphaCanvas(
+    ...,
+    universe=Field('univ500')  # Parquet에서 미리 정의된 유니버스 로드
+)
+```
+
+### 설계 근거
+
+* **불변성**: 단계별 PnL 비교를 위해 고정된 유니버스 필요
+* **재현성**: 백테스트 재현을 위해 동일한 유니버스 보장
+* **투명성**: 유니버스 변화에 따른 성과 왜곡 방지
+* **편의성**: 수동 마스킹 불필요, 모든 연산에 자동 적용
 
 -----

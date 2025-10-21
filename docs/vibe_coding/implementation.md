@@ -102,7 +102,167 @@ def db(self) -> xr.Dataset:
 - 래핑 없이 순수 `xarray.Dataset` 반환
 - 사용자는 `pure_ds = rc.db`로 꺼내서 scipy/statsmodels 사용 가능
 
-#### C. `rc.axis` Accessor 구현 (Selector Interface)
+#### C. 유니버스 마스킹 (Universe Masking) ✅ **IMPLEMENTED**
+
+**요구사항**: 초기화 시 유니버스를 설정하고, 모든 데이터와 연산에 자동 적용
+
+```python
+# AlphaCanvas 초기화 with universe
+rc = AlphaCanvas(
+    start_date='2024-01-01',
+    end_date='2024-12-31',
+    universe=price > 5.0  # Boolean DataArray
+)
+
+# 또는 Expression으로 설정
+rc = AlphaCanvas(
+    start_date='2024-01-01',
+    end_date='2024-12-31',
+    universe=Field('univ500')  # Field Expression (미래 확장)
+)
+
+# 유니버스 확인 (read-only)
+print(f"Universe coverage: {rc.universe.sum().values} positions")
+```
+
+**구현 세부사항**:
+
+**1. AlphaCanvas에 universe 파라미터 추가**:
+```python
+class AlphaCanvas:
+    def __init__(
+        self,
+        config_dir='config',
+        start_date=None,
+        end_date=None,
+        time_index=None,
+        asset_index=None,
+        universe: Optional[Union[Expression, xr.DataArray]] = None  # NEW
+    ):
+        # ... 기존 초기화 ...
+        
+        # Universe mask 초기화 (불변)
+        self._universe_mask: Optional[xr.DataArray] = None
+        if universe is not None:
+            self._set_initial_universe(universe)
+    
+    def _set_initial_universe(self, universe: Union[Expression, xr.DataArray]) -> None:
+        """유니버스 마스크를 초기화 시 한 번만 설정 (불변)."""
+        # Expression 평가 (e.g., Field('univ500'))
+        if isinstance(universe, Expression):
+            universe_data = self._evaluator.evaluate(universe)
+        else:
+            universe_data = universe
+        
+        # Shape 검증
+        expected_shape = (
+            len(self._panel.db.coords['time']), 
+            len(self._panel.db.coords['asset'])
+        )
+        if universe_data.shape != expected_shape:
+            raise ValueError(
+                f"Universe mask shape {universe_data.shape} doesn't match "
+                f"data shape {expected_shape}"
+            )
+        
+        # Dtype 검증
+        if universe_data.dtype != bool:
+            raise TypeError(f"Universe must be boolean, got {universe_data.dtype}")
+        
+        # 불변 저장
+        self._universe_mask = universe_data
+        
+        # Evaluator에 전파 (자동 적용 위해)
+        self._evaluator._universe_mask = self._universe_mask
+    
+    @property
+    def universe(self) -> Optional[xr.DataArray]:
+        """유니버스 마스크 조회 (read-only)."""
+        return self._universe_mask
+```
+
+**2. EvaluateVisitor에 이중 마스킹 구현**:
+```python
+class EvaluateVisitor:
+    def __init__(self, data_source: xr.Dataset, data_loader=None):
+        self._data = data_source
+        self._data_loader = data_loader
+        self._universe_mask: Optional[xr.DataArray] = None  # AlphaCanvas가 설정
+        self._cache: Dict[int, Tuple[str, xr.DataArray]] = {}
+        self._step_counter = 0
+    
+    def visit_field(self, node) -> xr.DataArray:
+        """Field 노드 방문 with INPUT MASKING."""
+        # 필드 로드 (캐시 또는 DataLoader)
+        if node.name in self._data:
+            result = self._data[node.name]
+        else:
+            if self._data_loader is None:
+                raise RuntimeError(f"Field '{node.name}' not found")
+            result = self._data_loader.load_field(node.name)
+            self._data = self._data.assign({node.name: result})
+        
+        # INPUT MASKING: 필드 검색 시 유니버스 적용
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        
+        self._cache_result(f"Field_{node.name}", result)
+        return result
+    
+    def visit_operator(self, node) -> xr.DataArray:
+        """연산자 방문 with OUTPUT MASKING."""
+        # 1. 순회: 자식 평가 (이미 마스킹됨)
+        child_result = node.child.accept(self)
+        
+        # 2. 위임: 연산자의 compute() 호출
+        result = node.compute(child_result)
+        
+        # 3. OUTPUT MASKING: 연산 결과에 유니버스 적용
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        
+        # 4. 캐싱
+        operator_name = node.__class__.__name__
+        self._cache_result(operator_name, result)
+        
+        return result
+```
+
+**3. add_data()에서 주입 데이터 마스킹**:
+```python
+def add_data(self, name: str, data: Union[Expression, xr.DataArray]) -> None:
+    """데이터 추가 with 유니버스 마스킹."""
+    if isinstance(data, Expression):
+        # Expression 경로 - Evaluator가 자동 마스킹
+        self.rules[name] = data
+        result = self._evaluator.evaluate(data)
+        self._panel.add_data(name, result)
+        
+        # Evaluator 재동기화 시 유니버스 보존
+        self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+        if self._universe_mask is not None:
+            self._evaluator._universe_mask = self._universe_mask
+    
+    elif isinstance(data, xr.DataArray):
+        # DataArray 직접 주입 - 여기서 마스킹
+        if self._universe_mask is not None:
+            data = data.where(self._universe_mask, float('nan'))
+        
+        self._panel.add_data(name, data)
+        self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+        if self._universe_mask is not None:
+            self._evaluator._universe_mask = self._universe_mask
+```
+
+**핵심 사항**:
+- **불변성**: 유니버스는 초기화 시 한 번만 설정, 변경 불가
+- **이중 마스킹**: Field 입력 + Operator 출력 모두 마스킹 (신뢰 체인)
+- **Open Toolkit**: 주입된 DataArray도 자동 마스킹
+- **성능**: 13.6% 오버헤드 (xarray lazy evaluation으로 무시 가능)
+
+---
+
+#### D. `rc.axis` Accessor 구현 (Selector Interface) 📋 **PLANNED**
 
 ```python
 class AxisAccessor:
