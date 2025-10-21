@@ -7,7 +7,7 @@ implementation coordinating all subsystems (Config, DataPanel, Expression, Visit
 
 import pandas as pd
 import xarray as xr
-from typing import Union
+from typing import Union, Optional
 
 from .config import ConfigLoader
 from .data_model import DataPanel
@@ -56,7 +56,8 @@ class AlphaCanvas:
         start_date: str = None,
         end_date: str = None,
         time_index=None,
-        asset_index=None
+        asset_index=None,
+        universe: Optional[Union[Expression, xr.DataArray]] = None
     ):
         """Initialize AlphaCanvas with configuration and data indices.
         
@@ -66,6 +67,8 @@ class AlphaCanvas:
             end_date: End date for data loading (YYYY-MM-DD format)
             time_index: Time index for panel data (used if start_date/end_date not provided)
             asset_index: Asset identifiers (used if start_date/end_date not provided)
+            universe: Optional universe mask (T, N) boolean DataArray or Expression.
+                     Once set, immutable for the session to ensure fair PnL comparisons.
         
         Example:
             >>> # With date range (loads from Parquet)
@@ -81,6 +84,14 @@ class AlphaCanvas:
             ...     config_dir='custom_config',
             ...     time_index=time_idx,
             ...     asset_index=assets
+            ... )
+            >>> 
+            >>> # With universe mask (investable universe)
+            >>> universe_mask = (price > 5.0) & (volume > 100000)
+            >>> rc = AlphaCanvas(
+            ...     start_date='2024-01-01',
+            ...     end_date='2024-12-31',
+            ...     universe=universe_mask
             ... )
         """
         # Load configurations
@@ -112,6 +123,61 @@ class AlphaCanvas:
         
         # Storage for Expression rules
         self.rules = {}
+        
+        # Initialize universe mask (immutable once set)
+        self._universe_mask: Optional[xr.DataArray] = None
+        if universe is not None:
+            self._set_initial_universe(universe)
+    
+    def _set_initial_universe(self, universe: Union[Expression, xr.DataArray]) -> None:
+        """Set universe mask at initialization (one-time only).
+        
+        Args:
+            universe: Expression (e.g., Field('univ500')) or boolean DataArray
+        
+        Raises:
+            ValueError: If universe shape doesn't match data shape
+            TypeError: If universe is not boolean dtype
+        """
+        # Evaluate if Expression
+        if isinstance(universe, Expression):
+            universe_data = self._evaluator.evaluate(universe)
+        else:
+            universe_data = universe
+        
+        # Validate shape
+        expected_shape = (
+            len(self._panel.db.coords['time']), 
+            len(self._panel.db.coords['asset'])
+        )
+        if universe_data.shape != expected_shape:
+            raise ValueError(
+                f"Universe mask shape {universe_data.shape} doesn't match "
+                f"data shape {expected_shape}"
+            )
+        
+        # Validate dtype
+        if universe_data.dtype != bool:
+            raise TypeError(f"Universe must be boolean, got {universe_data.dtype}")
+        
+        # Store as immutable
+        self._universe_mask = universe_data
+        
+        # Pass to evaluator for auto-application
+        self._evaluator._universe_mask = self._universe_mask
+    
+    @property
+    def universe(self) -> Optional[xr.DataArray]:
+        """Get current universe mask (read-only).
+        
+        Returns:
+            Universe mask (T, N) boolean DataArray, or None if not set
+        
+        Example:
+            >>> rc = AlphaCanvas(..., universe=price > 5.0)
+            >>> print(f"Universe coverage: {rc.universe.sum().values} stocks")
+        """
+        return self._universe_mask
     
     @property
     def db(self) -> xr.Dataset:
@@ -174,8 +240,15 @@ class AlphaCanvas:
             
             # Re-sync evaluator with updated dataset
             self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+            # Preserve universe mask reference
+            if self._universe_mask is not None:
+                self._evaluator._universe_mask = self._universe_mask
         else:
-            # Direct injection path
+            # Direct injection path (Open Toolkit pattern)
+            # Apply universe mask to injected data
+            if self._universe_mask is not None:
+                data = data.where(self._universe_mask, float('nan'))
+            
             # Lazy panel initialization from first data load
             if self._panel is None:
                 time_index = data.coords['time'].values
@@ -186,6 +259,9 @@ class AlphaCanvas:
 
             # Re-sync evaluator with updated dataset
             self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+            # Preserve universe mask reference
+            if self._universe_mask is not None:
+                self._evaluator._universe_mask = self._universe_mask
     
     def ts_mean(self, field_name: str, window: int) -> xr.DataArray:
         """Convenience helper: compute and return ts_mean immediately.

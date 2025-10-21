@@ -5,8 +5,9 @@ This module provides the EvaluateVisitor which traverses Expression trees
 in depth-first order, caching intermediate results with integer step indices.
 """
 
+import numpy as np
 import xarray as xr
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 
 class EvaluateVisitor:
@@ -56,6 +57,7 @@ class EvaluateVisitor:
         """
         self._data = data_source
         self._data_loader = data_loader
+        self._universe_mask: Optional[xr.DataArray] = None  # Set by AlphaCanvas
         self._cache: Dict[int, Tuple[str, xr.DataArray]] = {}
         self._step_counter = 0
     
@@ -85,17 +87,20 @@ class EvaluateVisitor:
         return expr.accept(self)
     
     def visit_field(self, node) -> xr.DataArray:
-        """Visit Field node: retrieve from dataset or load from DB.
+        """Visit Field node: retrieve from dataset or load from DB with INPUT MASKING.
         
         This method first checks if the field exists in the dataset.
         If not, and a data_loader is available, it loads the field from
         the database (Parquet file) using the data_loader.
         
+        Universe masking is applied at this stage (input masking) to ensure
+        all data entering the computation pipeline respects the investable universe.
+        
         Args:
             node: Field expression node
         
         Returns:
-            xarray.DataArray from dataset or loaded from DB
+            xarray.DataArray from dataset or loaded from DB (with universe applied)
         
         Raises:
             KeyError: If field name not found in dataset or config
@@ -119,38 +124,51 @@ class EvaluateVisitor:
             # Add to dataset for caching
             self._data = self._data.assign({node.name: result})
         
+        # INPUT MASKING: Apply universe at field retrieval
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        
         self._cache_result(f"Field_{node.name}", result)
         return result
     
     def visit_operator(self, node) -> xr.DataArray:
-        """Generic visitor for operators following compute() pattern.
+        """Generic visitor for operators with OUTPUT MASKING.
         
-        This method implements the standard 3-step pattern for all operators:
-        1. Traverse tree (evaluate child/children)
+        This method implements the standard pattern for all operators:
+        1. Traverse tree (evaluate child/children) - child already masked
         2. Delegate computation to operator's compute()
-        3. Cache result
+        3. Apply universe mask to output (output masking)
+        4. Cache result
         
         All operators (TsMean, TsAny, Rank, etc.) use this single method,
         eliminating code duplication entirely.
+        
+        The double masking strategy (Field input + Operator output) creates
+        a trust chain where operators trust their input is masked and ensure
+        their output is also masked.
         
         Args:
             node: Expression node with compute() method and child attribute
         
         Returns:
-            DataArray result from operator's compute()
+            DataArray result from operator's compute() (with universe applied)
         
         Example:
             >>> # All operators call this via accept(visitor)
             >>> expr = TsMean(child=Field('returns'), window=5)
             >>> result = expr.accept(visitor)  # Calls visit_operator
         """
-        # 1. Traversal: evaluate child expression
+        # 1. Traversal: evaluate child expression (child already masked from Field or previous operator)
         child_result = node.child.accept(self)
         
         # 2. Delegation: operator does its own computation
         result = node.compute(child_result)
         
-        # 3. State collection: cache result with step counter
+        # 3. OUTPUT MASKING: Apply universe to operator result
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        
+        # 4. State collection: cache result with step counter
         operator_name = node.__class__.__name__
         self._cache_result(operator_name, result)
         
