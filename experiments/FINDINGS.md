@@ -899,7 +899,267 @@ def accept(self, visitor):
 3. ✓ Rank operator implemented with compute()
 4. ✓ All tests passing (87/87)
 5. ✓ Code cleanup (AddOne removed)
-6. Create showcase demonstrating rank() operator
-7. Document in FINDINGS.md (this entry)
+6. ✓ Create showcase demonstrating rank() operator
+7. ✓ Document in FINDINGS.md (this entry)
+
+---
+
+## Phase 10: Universe Masking
+
+### Experiment 13: Universe Masking Behavior
+
+**Date**: 2025-01-21  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated automatic universe masking with double-application strategy (input + output). The `xarray.where(mask, np.nan)` approach is idempotent, performant (13.6% overhead), and creates a trust chain where all data respects the investable universe.
+
+#### Key Discoveries
+
+1. **xarray.where() Perfect for Masking**
+   - **Syntax**: `data.where(mask, np.nan)`
+   - **Behavior**: Keep values where mask is True, replace with NaN where False
+   - **Performance**: Lazy evaluation makes it very efficient
+   - **Idempotent**: Masking twice produces identical result (no data corruption)
+
+2. **Double Masking Strategy (Trust Chain)**
+   - **Input Masking**: Applied at Field retrieval (`visit_field`)
+   - **Output Masking**: Applied at operator output (`visit_operator`)
+   - **Rationale**: Creates trust chain - operators trust input is masked, ensure output is masked
+   - **Validation**: Double masking is idempotent (`np.allclose(masked_once, masked_twice, equal_nan=True)`)
+
+3. **Performance Impact Acceptable**
+   - **Dataset**: (500, 100) with 80% universe coverage
+   - **No masking**: 4.50ms
+   - **Single masking**: 4.90ms (8.9% overhead)
+   - **Double masking**: 5.11ms (13.6% overhead)
+   - **Conclusion**: Negligible overhead with xarray's lazy evaluation
+
+4. **NaN Propagation Through Operator Chains**
+   - **Field masking**: Raw data NaN → ts_mean input NaN
+   - **Operator masking**: ts_mean output NaN → rank input NaN
+   - **Result**: NaN positions preserved correctly through entire chain
+   - **Verified with**: Field → ts_mean → rank chains
+
+5. **Edge Cases Handled Correctly**
+   - **All False universe**: Produces all NaN output (as expected)
+   - **Time-varying universe**: Delisting scenario works correctly
+   - **Cross-sectional operators**: Rank respects universe (excluded stocks → NaN)
+   - **Empty universe positions**: Don't affect ranking of valid stocks
+
+#### Architecture Pattern
+
+**Double Masking in Visitor**:
+
+```python
+class EvaluateVisitor:
+    def __init__(self, data_source, data_loader=None):
+        self._universe_mask: Optional[xr.DataArray] = None  # Set by AlphaCanvas
+        # ... other initialization ...
+    
+    def visit_field(self, node) -> xr.DataArray:
+        """INPUT MASKING at field retrieval."""
+        # Retrieve data
+        if node.name in self._data:
+            result = self._data[node.name]
+        else:
+            result = self._data_loader.load_field(node.name)
+            self._data = self._data.assign({node.name: result})
+        
+        # Apply universe at input
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        
+        self._cache_result(f"Field_{node.name}", result)
+        return result
+    
+    def visit_operator(self, node) -> xr.DataArray:
+        """OUTPUT MASKING at operator result."""
+        # 1. Traversal (child already masked)
+        child_result = node.child.accept(self)
+        # 2. Delegation
+        result = node.compute(child_result)
+        # 3. OUTPUT MASKING
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        # 4. State collection
+        self._cache_result(node.__class__.__name__, result)
+        return result
+```
+
+**AlphaCanvas Initialization**:
+
+```python
+class AlphaCanvas:
+    def __init__(
+        self,
+        config_dir='config',
+        start_date=None,
+        end_date=None,
+        time_index=None,
+        asset_index=None,
+        universe: Optional[Union[Expression, xr.DataArray]] = None  # NEW
+    ):
+        # ... existing initialization ...
+        
+        # Initialize universe (immutable)
+        self._universe_mask: Optional[xr.DataArray] = None
+        if universe is not None:
+            self._set_initial_universe(universe)
+    
+    def _set_initial_universe(self, universe):
+        """Validate and set universe (one-time only)."""
+        # Evaluate if Expression
+        if isinstance(universe, Expression):
+            universe_data = self._evaluator.evaluate(universe)
+        else:
+            universe_data = universe
+        
+        # Validate shape and dtype
+        expected_shape = (len(self._panel.db.coords['time']), 
+                         len(self._panel.db.coords['asset']))
+        if universe_data.shape != expected_shape:
+            raise ValueError(f"Universe mask shape mismatch")
+        if universe_data.dtype != bool:
+            raise TypeError(f"Universe must be boolean")
+        
+        # Store and propagate to evaluator
+        self._universe_mask = universe_data
+        self._evaluator._universe_mask = self._universe_mask
+    
+    @property
+    def universe(self) -> Optional[xr.DataArray]:
+        """Read-only universe property."""
+        return self._universe_mask
+```
+
+**Injected Data Masking (Open Toolkit)**:
+
+```python
+def add_data(self, name, data):
+    if isinstance(data, Expression):
+        # Expression path - auto-masked by visitor
+        result = self._evaluator.evaluate(data)
+        self._panel.add_data(name, result)
+    else:
+        # Direct injection - apply universe here
+        if self._universe_mask is not None:
+            data = data.where(self._universe_mask, float('nan'))
+        self._panel.add_data(name, data)
+    
+    # Re-sync evaluator, preserve universe
+    self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+    if self._universe_mask is not None:
+        self._evaluator._universe_mask = self._universe_mask
+```
+
+#### Design Rationale
+
+**Q: Why double masking? Isn't it redundant?**
+
+A: No! It creates a trust chain:
+- **Field masking**: Ensures raw data respects universe
+- **Operator masking**: Guarantees output respects universe
+- **Idempotent**: Masked data stays masked (no corruption)
+- **Performance**: <15% overhead (negligible)
+- **Trust**: Operators don't worry about universe logic
+- **Safety**: Even if Field masking fails, operator masking catches it
+
+**Q: Why immutable universe?**
+
+A: Fair PnL step-by-step comparison requires fixed universe:
+- Can't compare alpha_t vs alpha_{t+1} if universe changes
+- Ensures reproducible backtests
+- Prevents accidental universe modifications mid-analysis
+- Aligns with "set once at session start" philosophy
+
+**Q: Why not mask in operators themselves?**
+
+A: Separation of concerns:
+- **Operators**: Focus on computation logic (pure functions)
+- **Visitor**: Handles traversal, state, and universe application
+- **Result**: Operators are testable in isolation without universe
+- **Maintainability**: Universe logic centralized in one place
+
+#### Future Extensions
+
+1. **Database-Backed Universe**: `AlphaCanvas(universe=Field('univ500'))`
+   - Load universe from Parquet like any other field
+   - Stored as: `date, security_id, liquidity_rank, univ100, univ200, univ500, univ1000`
+   - No code changes needed - Expression evaluation handles it
+
+2. **Dynamic Universe Creation**: Universe creator utility
+   - `create_universe(price > 5, volume > 100000, market_cap > 1e9)`
+   - Persist to database for reuse
+   - Support complex logic (sector constraints, correlation filters, etc.)
+
+3. **Universe Analytics**: Metrics and validation
+   - `rc.universe.sum()` - total positions in universe
+   - `rc.universe.mean(dim='time')` - stock persistence in universe
+   - Turnover tracking (universe changes over time)
+
+#### Test Results
+
+- **13 tests** for universe masking functionality
+- **Test Coverage**:
+  - AlphaCanvas initialization (with/without universe)
+  - Validation (shape, dtype errors)
+  - Field retrieval masking (input)
+  - Operator output masking (output)
+  - Double masking idempotency
+  - Operator chains (ts_mean, rank)
+  - Edge cases (all False, time-varying)
+  - Injected data (Open Toolkit pattern)
+- **All tests pass** ✓
+
+#### Showcase Highlights
+
+**Showcase 09: Universe Masking** demonstrates:
+
+1. **Initialize with universe**: `AlphaCanvas(universe=price > 5.0)`
+2. **Automatic masking**: Field retrieval and operator output both masked
+3. **Comparison**: Same data with vs without universe
+4. **Operator chains**: Field → ts_mean → rank (all masked)
+5. **Open Toolkit**: Injected DataArray also respects universe
+6. **Read-only property**: `rc.universe` for inspection
+7. **Coverage statistics**: Universe coverage over time
+8. **Visual validation**: Tables showing masked vs unmasked values
+
+**Output Highlights**:
+- Low-priced stocks (PENNY_STOCK, MICROCAP, ILLIQUID) always NaN
+- High-priced stocks (AAPL, NVDA, GOOGL) have values
+- ts_mean preserves masking (NaN propagates through rolling window)
+- rank excludes universe-excluded stocks from ranking
+- Injected returns respect universe automatically
+
+#### Performance Benchmarks
+
+| Operation | Time (ms) | vs Baseline | Notes |
+|-----------|-----------|-------------|-------|
+| No masking | 4.50 | - | Baseline (no universe) |
+| Single mask | 4.90 | +8.9% | Field masking only |
+| Double mask | 5.11 | +13.6% | Field + Operator masking |
+
+**Conclusion**: 13.6% overhead is acceptable for the safety and clarity provided by double masking.
+
+#### Lessons Learned
+
+1. **xarray.where() is Perfect**: Built-in masking method is idempotent and performant
+2. **Double Masking Creates Trust**: Input + output masking ensures correctness
+3. **Immutability Ensures Fairness**: Fixed universe for reproducible backtests
+4. **Centralize Universe Logic**: Keep in Visitor, not in operators
+5. **Open Toolkit Integration**: Injected data also needs masking
+6. **Validation is Critical**: Shape and dtype validation prevents subtle bugs
+7. **Performance is Not a Concern**: <15% overhead with xarray lazy evaluation
+
+#### Next Steps
+
+1. ✓ Experiment validated double masking behavior
+2. ✓ TDD tests implemented (13 tests)
+3. ✓ AlphaCanvas updated with universe parameter
+4. ✓ EvaluateVisitor updated with double masking
+5. ✓ Showcase demonstrates all features
+6. ✓ Document in FINDINGS.md (this entry)
+7. Future: Implement database-backed universes via Field('univ500')
+8. Future: Create universe creator utility for complex universe definitions
 
 ---
