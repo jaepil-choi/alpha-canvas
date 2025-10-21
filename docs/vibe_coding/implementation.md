@@ -1028,6 +1028,219 @@ mask = rc.data['size'] == 'small'  # Returns Equals Expression
 result = rc.evaluate(mask)  # Boolean DataArray with universe masking
 ```
 
+---
+
+## 3.4.2. Signal Assignment (Lazy Evaluation) ✅ **IMPLEMENTED**
+
+### 개요
+
+**Signal Assignment**는 Expression 객체에 값을 할당하여 시그널을 구성하는 기능입니다. Fama-French 팩터와 같은 복잡한 시그널을 직관적인 문법으로 생성할 수 있습니다.
+
+**핵심 설계 원칙**:
+- **Lazy Evaluation**: 할당은 저장만 하고 즉시 실행하지 않음
+- **Implicit Canvas**: 별도의 캔버스 생성 없이 Expression 결과가 캔버스 역할
+- **Traceability**: Base result와 final result를 별도로 캐싱하여 추적 가능
+- **DRY Principle**: Lazy initialization으로 모든 Expression에서 자동 작동
+
+### Expression.__setitem__ 구현 (DRY Lazy Initialization)
+
+```python
+class Expression(ABC):
+    """Base class for all Expressions.
+    
+    Supports lazy assignment via __setitem__:
+        signal[mask] = value  # Stores assignment, does not evaluate
+    """
+    
+    def __setitem__(self, mask, value):
+        """Store assignment for lazy evaluation.
+        
+        Uses lazy initialization - _assignments list is created on first use.
+        This follows the DRY principle: no __post_init__ needed in subclasses.
+        
+        Args:
+            mask: Boolean Expression or DataArray indicating where to assign
+            value: Scalar value to assign where mask is True
+        
+        Note:
+            Assignments are stored as (mask, value) tuples and applied sequentially
+            during evaluation. Later assignments overwrite earlier ones for overlapping
+            positions.
+        """
+        # Lazy initialization - create _assignments if it doesn't exist
+        if not hasattr(self, '_assignments'):
+            self._assignments = []
+        
+        self._assignments.append((mask, value))
+```
+
+**Lazy Initialization의 장점**:
+1. ✅ **No Boilerplate**: 모든 Expression 서브클래스에 `__post_init__` 불필요
+2. ✅ **DRY Principle**: 중복 코드 제거
+3. ✅ **Automatic**: 모든 Expression에서 자동으로 작동
+4. ✅ **Efficient**: 할당이 없으면 `_assignments` 속성도 생성되지 않음
+
+### Visitor Integration
+
+```python
+class EvaluateVisitor:
+    def evaluate(self, expr: Expression) -> xr.DataArray:
+        """Evaluate expression and apply assignments if present."""
+        # Step 1: Evaluate base expression (tree traversal)
+        base_result = expr.accept(self)
+        
+        # Step 2: Check if expression has assignments (lazy initialization)
+        assignments = getattr(expr, '_assignments', None)
+        if assignments:
+            # Cache base result for traceability
+            base_name = f"{expr.__class__.__name__}_base"
+            self._cache[self._step_counter] = (base_name, base_result)
+            self._step_counter += 1
+            
+            # Apply assignments sequentially
+            final_result = self._apply_assignments(base_result, assignments)
+            
+            # Apply universe masking to final result
+            if self._universe_mask is not None:
+                final_result = final_result.where(self._universe_mask)
+            
+            # Cache final result
+            final_name = f"{expr.__class__.__name__}_with_assignments"
+            self._cache[self._step_counter] = (final_name, final_result)
+            self._step_counter += 1
+            
+            return final_result
+        
+        # No assignments, return base result as-is
+        return base_result
+    
+    def _apply_assignments(self, base_result: xr.DataArray, assignments: list) -> xr.DataArray:
+        """Apply assignments sequentially to base result."""
+        result = base_result.copy(deep=True)
+        
+        for mask_expr, value in assignments:
+            # If mask is an Expression, evaluate it
+            if hasattr(mask_expr, 'accept'):
+                mask_data = mask_expr.accept(self)
+            else:
+                # Already a DataArray or numpy array
+                mask_data = mask_expr
+            
+            # Ensure mask is boolean (required for ~ operator)
+            mask_bool = mask_data.astype(bool)
+            
+            # Apply assignment: replace values where mask is True
+            result = result.where(~mask_bool, value)
+        
+        return result
+```
+
+### Constant Expression (Blank Canvas)
+
+```python
+from dataclasses import dataclass
+import numpy as np
+import xarray as xr
+from alpha_canvas.core.expression import Expression
+
+
+@dataclass(eq=False)
+class Constant(Expression):
+    """Expression that produces a constant-valued DataArray.
+    
+    Creates a universe-shaped (T, N) DataArray filled with the specified
+    constant value. Serves as a "blank canvas" for signal construction.
+    
+    Example:
+        >>> signal = Constant(0.0)  # Blank canvas (all zeros)
+        >>> signal[mask1] = 1.0     # Assign long positions
+        >>> signal[mask2] = -1.0    # Assign short positions
+    """
+    value: float
+    
+    def accept(self, visitor):
+        return visitor.visit_constant(self)
+```
+
+### 사용 예시: Fama-French 2×3 Factor
+
+```python
+# Step 1: Create size and value classifications
+rc.add_data('size', CsQuantile(Field('market_cap'), bins=2, labels=['small', 'big']))
+rc.add_data('value', CsQuantile(Field('book_to_market'), bins=3, labels=['low', 'medium', 'high']))
+
+# Step 2: Create selector masks
+is_small = rc.data['size'] == 'small'
+is_big = rc.data['size'] == 'big'
+is_low = rc.data['value'] == 'low'
+is_high = rc.data['value'] == 'high'
+
+# Step 3: Construct signal with lazy assignments
+signal = Constant(0.0)                # Implicit blank canvas
+signal[is_small & is_high] = 1.0      # Small/High-Value (long)
+signal[is_big & is_low] = -1.0        # Big/Low-Value (short)
+
+# Step 4: Evaluate (assignments applied here)
+result = rc.evaluate(signal)
+
+# Result: universe-shaped (T, N) array
+#  - 1.0 where size=='small' AND value=='high'
+#  - -1.0 where size=='big' AND value=='low'
+#  - 0.0 elsewhere (neutral)
+#  - NaN outside universe
+```
+
+### Overlapping Masks (Sequential Application)
+
+```python
+signal = Constant(0.0)
+signal[is_small] = 0.5                # All small caps = 0.5
+signal[is_small & is_high] = 1.0      # Small/High overwrites to 1.0
+
+# Result: Later assignment wins for overlapping positions
+#  - Small/High: 1.0 (overwritten)
+#  - Small/Other: 0.5 (from first assignment)
+#  - Others: 0.0 (from Constant)
+```
+
+### Traceability
+
+```python
+# After evaluation, check cached steps
+for step_idx in sorted(rc._evaluator._cache.keys()):
+    name, data = rc._evaluator._cache[step_idx]
+    print(f"Step {step_idx}: {name}")
+
+# Output:
+#   Step 0: Constant_0.0_base             # Base constant array
+#   Step 1: Field_size                     # Size classification
+#   Step 2: Field_value                    # Value classification
+#   Step 3: Equals                         # is_small mask
+#   Step 4: Equals                         # is_high mask
+#   Step 5: And                            # is_small & is_high
+#   Step 6: Constant_0.0_with_assignments  # Final signal with assignments
+```
+
+**핵심 장점**:
+- Base result와 final result가 별도 단계로 캐싱됨
+- PnL tracking에 필수적인 기능
+- 각 할당의 영향을 단계별로 추적 가능
+
+### Implementation Checklist
+
+- ✅ `Expression.__setitem__` with lazy initialization (DRY)
+- ✅ `Visitor.evaluate()` handles assignments
+- ✅ `Visitor._apply_assignments()` sequential application
+- ✅ `Constant` Expression for blank canvas
+- ✅ `visit_constant()` in Visitor
+- ✅ Boolean mask conversion (`.astype(bool)`)
+- ✅ Universe masking integration
+- ✅ Traceability (separate base/final caching)
+- ✅ Tests: storage, evaluation, overlapping masks, caching
+- ✅ Showcase: Fama-French 2×3 factor construction
+
+---
+
 ## 3.5. 개발 원칙
 
 ### 3.5.1. 지연 평가 (Lazy Evaluation)
