@@ -36,11 +36,11 @@ PRD의 요구사항(F1, F2, F3)을 구현하기 위해 **퍼사드(Facade)**, **
 
   * **설계 원칙:** 각 연산자(`Expression`)는 자신의 계산 로직을 `compute()` 메서드로 캡슐화합니다.
   * **Visitor의 역할:**
-    - ❌ **하지 않는 것:** 연산자별 계산 로직 구현 (예: rolling window 계산)
-    - ✅ **하는 것:** 트리 순회, 계산 위임, 결과 캐싱
+    * ❌ **하지 않는 것:** 연산자별 계산 로직 구현 (예: rolling window 계산)
+    * ✅ **하는 것:** 트리 순회, 계산 위임, 결과 캐싱
   * **연산자의 역할:**
-    - ✅ **하는 것:** 자신의 핵심 계산 로직 구현 (`compute()` 메서드)
-    - ✅ **하는 것:** Visitor 인터페이스 제공 (`accept()` 메서드)
+    * ✅ **하는 것:** 자신의 핵심 계산 로직 구현 (`compute()` 메서드)
+    * ✅ **하는 것:** Visitor 인터페이스 제공 (`accept()` 메서드)
   * **이점:**
     1. **단일 책임 원칙(SRP):** Visitor는 순회만, 연산자는 계산만
     2. **테스트 용이성:** `compute()` 메서드를 독립적으로 테스트 가능
@@ -53,19 +53,19 @@ PRD의 요구사항(F1, F2, F3)을 구현하기 위해 **퍼사드(Facade)**, **
 
 * `DataPanel`은 `alpha-canvas`의 핵심 데이터 모델이며, 그 실체는 `xarray.Dataset` 객체입니다.
 * **좌표(Coordinates):** 모든 데이터는 `(time, asset)` 좌표를 공유합니다.
-* **데이터 변수(Data Variables):** 
-  - `rc.add_data(name, expr)` 메서드는 `rc._evaluator`(Visitor)를 호출하여 `expr`를 평가하고, 그 결과 `(T, N) DataArray`를 `rc.db.assign({name: result_array})`를 통해 `data_vars`에 **새로운 데이터 변수(Data Variable)로 추가**합니다.
-  - 예: `rc.add_data('size', cs_quantile(...))`는 `rc.db['size']`를 생성하며, 이는 `string` 타입의 레이블 배열입니다.
+* **데이터 변수(Data Variables):**
+  * `rc.add_data(name, expr)` 메서드는 `rc._evaluator`(Visitor)를 호출하여 `expr`를 평가하고, 그 결과 `(T, N) DataArray`를 `rc.db.assign({name: result_array})`를 통해 `data_vars`에 **새로운 데이터 변수(Data Variable)로 추가**합니다.
+  * 예: `rc.add_data('size', cs_quantile(...))`는 `rc.db['size']`를 생성하며, 이는 `string` 타입의 레이블 배열입니다.
 
 ### B. "개방형 툴킷" (Open Toolkit) 구현
 
 * **Eject (꺼내기):**
-  - `rc` 객체는 `db` 프로퍼티(e.g., `@property def db`)를 제공하여, `rc.db` 호출 시 래핑된 `xarray.Dataset` 객체를 **순수(pure) `xarray.Dataset` 타입**으로 반환해야 합니다.
-  - 이를 통해 사용자는 Jupyter에서 `scipy`, `statsmodels` 등 외부 라이브러리로 자유롭게 데이터를 조작할 수 있습니다.
+  * `rc` 객체는 `db` 프로퍼티(e.g., `@property def db`)를 제공하여, `rc.db` 호출 시 래핑된 `xarray.Dataset` 객체를 **순수(pure) `xarray.Dataset` 타입**으로 반환해야 합니다.
+  * 이를 통해 사용자는 Jupyter에서 `scipy`, `statsmodels` 등 외부 라이브러리로 자유롭게 데이터를 조작할 수 있습니다.
 
 * **Inject (주입하기):**
-  - `rc.add_data(name, data)` 메서드는 `Expression` 객체뿐만 아니라, 외부에서 생성된 `xarray.DataArray`도 `data` 인자로 받아 `rc.db`에 "주입(inject)"할 수 있도록 오버로딩되어야 합니다.
-  - 예: `rc.add_data('beta', beta_array)` (beta_array는 외부에서 scipy로 계산한 DataArray)
+  * `rc.add_data(name, data)` 메서드는 `Expression` 객체뿐만 아니라, 외부에서 생성된 `xarray.DataArray`도 `data` 인자로 받아 `rc.db`에 "주입(inject)"할 수 있도록 오버로딩되어야 합니다.
+  * 예: `rc.add_data('beta', beta_array)` (beta_array는 외부에서 scipy로 계산한 DataArray)
 
 ### C. 유니버스 마스킹 (Universe Masking)
 
@@ -114,34 +114,34 @@ PRD의 요구사항(F1, F2, F3)을 구현하기 위해 **퍼사드(Facade)**, **
     1. **설계 동기:**
           * 문자열 기반 step 이름(`step='ts_mean'`)은 연산자 이름 변경 시 깨지고, 동일 연산자가 여러 번 사용될 때 모호하며, 런타임 오류에 취약합니다.
           * 정수 인덱스는 견고하고(robust), 예측 가능하며(predictable), 타입 안전합니다(type-safe).
-    
+
     2. `rc._evaluator` (Visitor)는 **"Stateful(상태 저장)"** 객체입니다.
-    
+
     3. **Cache 구조:** `EvaluateVisitor`는 내부에 `cache: dict[str, dict[int, tuple[str, xr.DataArray]]]`를 소유합니다.
           * 외부 키: 변수명 (e.g., `'alpha1'`)
           * 내부 키: **정수 step 인덱스** (0부터 시작)
           * 값: `(노드_이름, DataArray)` 튜플 - 노드 이름은 디버깅용 메타데이터
-    
+
     4. `rc.add_data_var('alpha1', ...)`가 호출되면, `Visitor`는 `alpha1`의 `Expression` 트리를 **깊이 우선 탐색(depth-first)** 으로 순회하면서 **각 노드가 반환하는 중간 결과를 순차적으로 캐시**합니다.
           * 예시 Expression: `group_neutralize(ts_mean(Field('returns'), 3), 'subindustry')`
           * `cache['alpha1'][0]` = `('Field_returns', DataArray(...))`
           * `cache['alpha1'][1]` = `('ts_mean', DataArray(...))`
           * `cache['alpha1'][2]` = `('group_neutralize', DataArray(...))`
-    
+
     5. **병렬 Expression 예시:** `ts_mean(Field('returns'), 3) + rank(Field('market_cap'))`
           * step 0: `Field('returns')`
           * step 1: `ts_mean(Field('returns'), 3)`
           * step 2: `Field('market_cap')` ← 두 번째 브랜치 시작
           * step 3: `rank(Field('market_cap'))`
           * step 4: `add(step1, step3)` ← 병합
-    
+
     6. **선택적 추적:**
           * `rc.trace_pnl('alpha1', step=1)`: `cache['alpha1'][1]`의 데이터만 사용하여 PnL 계산
           * `rc.trace_pnl('alpha1', step=None)`: 모든 단계의 PnL을 순서대로 계산
           * `rc.get_intermediate('alpha1', step=1)`: `cache['alpha1'][1][1]` 반환 (DataArray 부분)
-    
+
     7. `PnLTracer`는 **재계산 없이(no re-computation)** 캐시된 배열들로 PnL을 계산합니다.
-    
+
     8. **Visitor의 step 카운터:** `EvaluateVisitor._step_counter` 변수를 유지하며, 각 노드 방문 시 증가시켜 순차적 인덱스를 부여합니다.
 
 * **F4 (팩터 수익률 계산 - 독립/종속 정렬):**
