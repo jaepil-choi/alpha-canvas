@@ -263,5 +263,36 @@ class AlphaCanvas:
             if self._universe_mask is not None:
                 self._evaluator._universe_mask = self._universe_mask
     
+    def evaluate(self, expr: Expression) -> xr.DataArray:
+        """Evaluate an Expression and return the result.
+        
+        This is a convenience method that delegates to the internal evaluator,
+        providing a cleaner public API without exposing implementation details.
+        
+        The result is NOT automatically added to the dataset. Use add_data()
+        if you want to store the result.
+        
+        Args:
+            expr: Expression to evaluate
+        
+        Returns:
+            xarray.DataArray result of evaluation (with universe masking applied)
+        
+        Example:
+            >>> # Evaluate without storing
+            >>> from alpha_canvas.core.expression import Field
+            >>> from alpha_canvas.ops.timeseries import TsMean
+            >>> 
+            >>> result = rc.evaluate(TsMean(Field('returns'), window=5))
+            >>> print(result)  # View result
+            >>> 
+            >>> # Evaluate and store
+            >>> rc.add_data('ma5', TsMean(Field('returns'), window=5))
+            >>> 
+            >>> # Compare to direct evaluator access (not recommended)
+            >>> # result = rc._evaluator.evaluate(expr)  # Don't do this!
+            >>> result = rc.evaluate(expr)  # Do this instead!
+        """
+        return self._evaluator.evaluate(expr)
 
 

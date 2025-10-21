@@ -136,8 +136,8 @@ print(f"  ✓ Comparison created Expression (lazy, not evaluated)")
 
 print_subsection("Evaluate Through Visitor (Eager)")
 
-# NOW evaluate through Visitor
-result = rc._evaluator.evaluate(small_expr)
+# NOW evaluate through Visitor (via public API)
+result = rc.evaluate(small_expr)
 
 print(f"  Result type: {type(result)}")
 print(f"  Result shape: {result.shape}")
@@ -169,7 +169,7 @@ print(f"  ✓ Logical AND created And Expression (lazy)")
 
 print_subsection("Evaluate Combined Expression")
 
-result = rc._evaluator.evaluate(combined_expr)
+result = rc.evaluate(combined_expr)
 
 print(f"  Result at t=0 (small AND high):")
 for i, asset in enumerate(asset_idx):
@@ -197,7 +197,7 @@ print(f"  Is Or Expression?: {isinstance(or_expr, Or)}")
 
 print_subsection("Evaluate OR Expression")
 
-result = rc._evaluator.evaluate(or_expr)
+result = rc.evaluate(or_expr)
 
 print(f"  Result at t=0 (small OR high):")
 for i, asset in enumerate(asset_idx):
@@ -225,7 +225,7 @@ print(f"  Is Not Expression?: {isinstance(not_small_expr, Not)}")
 
 print_subsection("Evaluate NOT Expression")
 
-result = rc._evaluator.evaluate(not_small_expr)
+result = rc.evaluate(not_small_expr)
 
 print(f"  Result at t=0 (NOT small):")
 for i, asset in enumerate(asset_idx):
@@ -253,7 +253,7 @@ print(f"  Is GreaterThan Expression?: {isinstance(price_gt_5, GreaterThan)}")
 
 print_subsection("Evaluate Numeric Expression")
 
-result = rc._evaluator.evaluate(price_gt_5)
+result = rc.evaluate(price_gt_5)
 
 print(f"  Result at t=0 (price > 5.0):")
 for i, asset in enumerate(asset_idx):
@@ -282,7 +282,7 @@ print(f"  Final type: {type(complex_expr).__name__}")
 
 print_subsection("Evaluate Complex Expression")
 
-result = rc._evaluator.evaluate(complex_expr)
+result = rc.evaluate(complex_expr)
 
 print(f"  Result at t=0:")
 for i, asset in enumerate(asset_idx):
@@ -337,7 +337,7 @@ print_subsection("Evaluate Expression with Universe")
 
 # Evaluate: size == 'small'
 small_expr_univ = Field('size') == 'small'
-result_univ = rc_with_univ._evaluator.evaluate(small_expr_univ)
+result_univ = rc_with_univ.evaluate(small_expr_univ)
 
 print(f"  Expression: size == 'small'")
 print(f"  Result at t=0 (with universe):")
@@ -364,7 +364,7 @@ print_subsection("Evaluate Multi-Step Expression")
 
 # Build: (size == 'small') & (value == 'high')
 expr = (Field('size') == 'small') & (Field('value') == 'high')
-result = rc._evaluator.evaluate(expr)
+result = rc.evaluate(expr)
 
 print(f"  Expression: (size == 'small') & (value == 'high')")
 print(f"  Total cached steps: {len(rc._evaluator._cache)}")
