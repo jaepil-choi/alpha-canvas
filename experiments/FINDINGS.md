@@ -1163,3 +1163,211 @@ A: Separation of concerns:
 8. Future: Create universe creator utility for complex universe definitions
 
 ---
+
+## Phase 11: Boolean Expressions (F2 Foundation)
+
+### Experiment 14: Boolean Expression Operators
+
+**Date**: 2025-10-21  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated Expression-based comparison and logical operators. The pattern of overloading Python operators (`__eq__`, `__gt__`, `__and__`, etc.) on the Expression base class creates lazy Boolean Expressions that go through the Visitor, ensuring universe masking is always applied.
+
+#### Key Discoveries
+
+1. **Dataclass __eq__ Override Issue**
+   - **Problem**: `@dataclass` generates its own `__eq__` method for structural equality
+   - **Impact**: Dataclass `__eq__` takes precedence over Expression's `__eq__`, breaking comparison operators
+   - **Solution**: Use `@dataclass(eq=False)` to disable dataclass equality generation
+   - **Application**: **ALL Expression dataclasses must use `eq=False`**
+
+2. **Lazy Evaluation Confirmed**
+   - `Field('size') == 'small'` creates **Equals Expression** (not immediate result)
+   - `(expr1 & expr2)` creates **And Expression** (lazy combination)
+   - No evaluation happens until `visitor.evaluate(expression)` is called
+   - **Critical**: Ensures universe masking via Visitor is never bypassed
+
+3. **Generic Visitor Pattern Extends Naturally**
+   - Boolean Expressions fit cleanly into existing `visit_operator()` pattern
+   - **Binary operators** (Equals, And, Or): Have `left` and `right` attributes
+   - **Unary operators** (Not): Have `child` attribute
+   - **Right operand** can be Expression or literal (e.g., `'small'`, `5.0`)
+   - Visitor detects structure via `hasattr()` and evaluates accordingly
+
+4. **Comparison Operators Validated**
+   - `==` (Equals), `!=` (NotEquals) ✓
+   - `>` (GreaterThan), `<` (LessThan) ✓
+   - `>=` (GreaterOrEqual), `<=` (LessOrEqual) ✓
+   - All produce correct boolean DataArrays
+   - All work with both numeric and string comparisons
+
+5. **Logical Operators Validated**
+   - `&` (And): Logical AND of two boolean Expressions ✓
+   - `|` (Or): Logical OR of two boolean Expressions ✓
+   - `~` (Not): Logical NOT of boolean Expression ✓
+   - Chained expressions work correctly: `(a == 'small') & (b == 'high')`
+
+6. **NaN Handling**
+   - **Comparisons**: NaN > 5.0 → False (standard xarray/numpy behavior)
+   - **Logical AND**: NaN & True → False
+   - **Logical OR**: NaN | True → True
+   - Behavior matches xarray's native boolean operations
+
+7. **Performance Excellent**
+   - **Dataset**: (500, 100) with string labels
+   - **Expression**: `(size == 'small') & (value == 'high')`
+   - **Time**: 2.0ms (extremely fast)
+   - **Conclusion**: Boolean Expressions add negligible overhead
+
+#### Architecture Pattern
+
+**Expression Base Class with Operators**:
+
+```python
+class Expression(ABC):
+    """Base class with comparison and logical operators."""
+    
+    # Comparison operators
+    def __eq__(self, other):
+        from alpha_canvas.ops.logical import Equals
+        return Equals(self, other)
+    
+    def __gt__(self, other):
+        from alpha_canvas.ops.logical import GreaterThan
+        return GreaterThan(self, other)
+    
+    # ... other comparisons ...
+    
+    # Logical operators
+    def __and__(self, other):
+        from alpha_canvas.ops.logical import And
+        return And(self, other)
+    
+    def __or__(self, other):
+        from alpha_canvas.ops.logical import Or
+        return Or(self, other)
+    
+    def __invert__(self):
+        from alpha_canvas.ops.logical import Not
+        return Not(self)
+```
+
+**Boolean Expression Classes**:
+
+```python
+@dataclass(eq=False)  # CRITICAL: disable dataclass __eq__
+class Equals(Expression):
+    left: Expression
+    right: Union[Expression, Any]  # Can be literal or Expression
+    
+    def accept(self, visitor):
+        return visitor.visit_operator(self)
+    
+    def compute(self, left_result: xr.DataArray, right_result: Any = None) -> xr.DataArray:
+        """Compare left and right (right can be literal)."""
+        if right_result is not None:
+            return left_result == right_result  # Both Expressions
+        else:
+            return left_result == self.right  # Right is literal
+```
+
+**Visitor Handles Binary and Unary Operators**:
+
+```python
+def visit_operator(self, node) -> xr.DataArray:
+    """Generic visitor supporting multiple patterns."""
+    
+    if hasattr(node, 'child'):
+        # Unary operator (TsMean, Rank, Not)
+        child_result = node.child.accept(self)
+        result = node.compute(child_result)
+    
+    elif hasattr(node, 'left') and hasattr(node, 'right'):
+        # Binary operator (Equals, And, Or, etc.)
+        left_result = node.left.accept(self)
+        
+        if isinstance(node.right, Expression):
+            right_result = node.right.accept(self)
+            result = node.compute(left_result, right_result)
+        else:
+            # Right is literal
+            result = node.compute(left_result)
+    
+    # Universe masking applied to output
+    if self._universe_mask is not None:
+        result = result.where(self._universe_mask, np.nan)
+    
+    self._cache_result(node.__class__.__name__, result)
+    return result
+```
+
+#### Use Cases Validated
+
+1. **String Comparison**
+   - `Field('size') == 'small'` → Boolean mask for small-cap stocks
+   - `Field('sector') != 'Finance'` → Exclude financial sector
+
+2. **Numeric Comparison**
+   - `Field('price') > 5.0` → Filter penny stocks
+   - `Field('volume') >= 100000` → Liquidity filter
+
+3. **Chained Conditions**
+   - `(Field('size') == 'small') & (Field('value') == 'high')` → Small-cap value stocks
+   - `(Field('price') < 5.0) | (Field('volume') < 10000)` → Low quality stocks
+
+4. **Negation**
+   - `~(Field('size') == 'small')` → Not small-cap
+
+#### Integration with F2 Selector Interface
+
+**This foundation enables**:
+
+```python
+# rc.data accessor returns Field Expressions
+small = rc.data['size'] == 'small'  # Creates Equals Expression
+high = rc.data['value'] == 'high'   # Creates Equals Expression
+
+# Combine with logical operators
+mask = small & high  # Creates And Expression
+
+# Later: Use with selector interface
+rc[mask] = 1.0  # Assign signal based on Expression mask
+```
+
+**Why Expression-based?**
+
+1. **Universe masking**: All comparisons go through Visitor → universe applied
+2. **Lazy evaluation**: Expressions can be composed without evaluation
+3. **Caching**: Visitor caches intermediate boolean masks (step indices)
+4. **Traceability**: Each comparison step is traceable via step index
+5. **Type safety**: Strong Expression tree structure
+
+#### Lessons Learned
+
+1. **Dataclass Equality Trap**: `eq=False` is **mandatory** for all Expression dataclasses
+2. **Lazy is Essential**: Expression-based comparisons ensure universe masking is never bypassed
+3. **Generic Visitor Scales**: Single `visit_operator()` handles all operator patterns (unary, binary)
+4. **Literal vs Expression**: Binary operators must handle both `right: Expression` and `right: literal`
+5. **Operator Overloading is Clean**: Python's `__eq__`, `__and__`, etc. provide intuitive syntax
+6. **Performance Non-Issue**: Boolean Expression evaluation is extremely fast (2ms for large dataset)
+
+#### Test Results
+
+- **All 100 existing tests pass** ✓ (no regressions)
+- Boolean Expression infrastructure integrated without breaking existing operators
+- `eq=False` applied to TsMean, TsAny, Rank, Field
+
+#### Next Steps
+
+1. ✓ Experiment validated Boolean Expression pattern
+2. ✓ Expression base class updated with operator overloading
+3. ✓ Boolean Expression classes implemented (ops/logical.py)
+4. ✓ Visitor updated to handle binary and unary operators
+5. ✓ All existing operator dataclasses updated with `eq=False`
+6. ✓ Full test suite passes (100/100)
+7. **TODO**: Create showcase demonstrating Boolean Expressions
+8. **TODO**: Implement cs_quantile operator (Phase 7A completion)
+9. **TODO**: Implement rc.data accessor (DataAccessor)
+10. **TODO**: Implement full F2 Selector Interface
+
+---
