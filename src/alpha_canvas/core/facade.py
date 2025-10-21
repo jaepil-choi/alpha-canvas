@@ -263,37 +263,5 @@ class AlphaCanvas:
             if self._universe_mask is not None:
                 self._evaluator._universe_mask = self._universe_mask
     
-    def ts_mean(self, field_name: str, window: int) -> xr.DataArray:
-        """Convenience helper: compute and return ts_mean immediately.
-        
-        This is Interface A (Excel-like Formula) style for quick computations.
-        The result is evaluated but NOT automatically added to the dataset.
-        
-        Args:
-            field_name: Name of field to compute rolling mean over
-            window: Rolling window size (number of time periods)
-        
-        Returns:
-            DataArray with rolling mean applied
-        
-        Example:
-            >>> # Quick 5-day moving average
-            >>> ma5 = rc.ts_mean('returns', 5)
-            >>> print(ma5)
-            >>>
-            >>> # Can be added to dataset manually
-            >>> rc.add_data('ma5', ma5)
-        
-        Note:
-            For storing the result in the dataset, use:
-            >>> from alpha_canvas.ops.timeseries import TsMean
-            >>> from alpha_canvas.core.expression import Field
-            >>> rc.add_data('ma5', TsMean(Field('returns'), window=5))
-        """
-        from alpha_canvas.ops.timeseries import TsMean
-        from alpha_canvas.core.expression import Field
-        
-        expr = TsMean(child=Field(field_name), window=window)
-        return self._evaluator.evaluate(expr)
 
 
