@@ -62,29 +62,117 @@ class EvaluateVisitor:
         self._step_counter = 0
     
     def evaluate(self, expr) -> xr.DataArray:
-        """Evaluate expression and return result.
+        """Evaluate expression and return result, applying assignments if present.
         
         This is the main entry point for evaluating an Expression tree.
         It resets the cache and step counter before evaluation to ensure
         each evaluation starts fresh.
         
+        **Assignment Handling (Lazy Evaluation):**
+        If the expression has assignments (stored via `expr[mask] = value`),
+        this method:
+        1. Evaluates the base expression (tree traversal)
+        2. Caches the base result as a separate step for traceability
+        3. Applies assignments sequentially using `_apply_assignments`
+        4. Applies universe masking to the final result
+        5. Caches the final result
+        
         Args:
             expr: Expression to evaluate
         
         Returns:
-            xarray.DataArray result of evaluation
+            xarray.DataArray result of evaluation (with assignments applied if present)
         
         Example:
+            >>> # Without assignments
             >>> field = Field('returns')
             >>> result = visitor.evaluate(field)
-            >>> assert result.shape == (100, 50)
+            >>> 
+            >>> # With assignments (lazy evaluation)
+            >>> signal = Field('returns')
+            >>> signal[Field('size') == 'small'] = 1.0
+            >>> signal[Field('size') == 'big'] = -1.0
+            >>> result = visitor.evaluate(signal)  # Assignments applied here
         """
         # Reset state for new evaluation
         self._step_counter = 0
         self._cache = {}
         
-        # Start depth-first traversal
-        return expr.accept(self)
+        # Evaluate base expression (tree traversal)
+        base_result = expr.accept(self)
+        
+        # Check if expression has assignments (lazy initialization)
+        assignments = getattr(expr, '_assignments', None)
+        if assignments:
+            # Cache base result for traceability
+            base_name = f"{expr.__class__.__name__}_base"
+            self._cache[self._step_counter] = (base_name, base_result)
+            self._step_counter += 1
+            
+            # Apply assignments sequentially
+            final_result = self._apply_assignments(base_result, assignments)
+            
+            # Apply universe masking to final result
+            if self._universe_mask is not None:
+                final_result = final_result.where(self._universe_mask)
+            
+            # Cache final result
+            final_name = f"{expr.__class__.__name__}_with_assignments"
+            self._cache[self._step_counter] = (final_name, final_result)
+            self._step_counter += 1
+            
+            return final_result
+        
+        # No assignments, return base result as-is
+        return base_result
+    
+    def _apply_assignments(self, base_result: xr.DataArray, assignments: list) -> xr.DataArray:
+        """Apply assignments sequentially to base result.
+        
+        Assignments are applied in the order they were added to the Expression.
+        For overlapping masks, later assignments overwrite earlier ones
+        (sequential application semantics).
+        
+        Args:
+            base_result: Base DataArray to modify (result of base expression)
+            assignments: List of (mask, value) tuples
+        
+        Returns:
+            Modified DataArray with assignments applied
+        
+        Note:
+            - Each mask can be an Expression (evaluated lazily here) or DataArray
+            - Values are scalars that replace base_result where mask is True
+            - NaN values outside the universe are preserved
+        
+        Example:
+            >>> base = xr.DataArray(...)  # All zeros
+            >>> assignments = [
+            ...     (Field('size') == 'small', 1.0),
+            ...     (Field('size') == 'big', -1.0)
+            ... ]
+            >>> result = visitor._apply_assignments(base, assignments)
+            >>> # result: 1.0 where size=='small', -1.0 where size=='big'
+        """
+        # Start with a copy to avoid mutating the base result
+        result = base_result.copy(deep=True)
+        
+        for mask_expr, value in assignments:
+            # If mask is an Expression, evaluate it
+            if hasattr(mask_expr, 'accept'):
+                mask_data = mask_expr.accept(self)
+            else:
+                # Already a DataArray or numpy array
+                mask_data = mask_expr
+            
+            # Ensure mask is boolean (required for ~ operator)
+            # This handles cases where mask_data might be float or int
+            mask_bool = mask_data.astype(bool)
+            
+            # Apply assignment: replace values where mask is True
+            result = result.where(~mask_bool, value)
+        
+        return result
     
     def visit_field(self, node) -> xr.DataArray:
         """Visit Field node: retrieve from dataset or load from DB with INPUT MASKING.
@@ -129,6 +217,40 @@ class EvaluateVisitor:
             result = result.where(self._universe_mask, np.nan)
         
         self._cache_result(f"Field_{node.name}", result)
+        return result
+    
+    def visit_constant(self, node) -> xr.DataArray:
+        """Visit Constant node: create constant-valued DataArray with panel shape.
+        
+        Creates a (T, N) DataArray filled with the constant value.
+        The shape is determined by the existing dataset's time and asset coordinates.
+        Universe masking is applied by the Visitor after evaluation.
+        
+        Args:
+            node: Constant expression node with 'value' attribute
+        
+        Returns:
+            xr.DataArray filled with constant value, panel-shaped (T, N)
+        
+        Example:
+            >>> constant = Constant(0.0)
+            >>> result = constant.accept(visitor)  # Creates zeros array
+        """
+        # Get shape from dataset coordinates
+        time_coord = self._data.coords['time']
+        asset_coord = self._data.coords['asset']
+        
+        # Create constant-valued array
+        result = xr.DataArray(
+            np.full((len(time_coord), len(asset_coord)), node.value),
+            dims=['time', 'asset'],
+            coords={'time': time_coord, 'asset': asset_coord}
+        )
+        
+        # Universe masking is applied by OUTPUT MASKING in visit_operator
+        # or by evaluate() after assignments
+        
+        self._cache_result(f"Constant_{node.value}", result)
         return result
     
     def visit_operator(self, node) -> xr.DataArray:
