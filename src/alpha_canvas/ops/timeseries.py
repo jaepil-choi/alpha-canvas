@@ -49,7 +49,7 @@ class TsMean(Expression):
     
     def accept(self, visitor):
         """Accept a visitor for the Visitor pattern."""
-        return visitor.visit_ts_mean(self)
+        return visitor.visit_operator(self)
     
     def compute(self, child_result: 'xr.DataArray') -> 'xr.DataArray':
         """Core computation logic for rolling mean.
@@ -116,7 +116,7 @@ class TsAny(Expression):
     
     def accept(self, visitor):
         """Accept a visitor for the Visitor pattern."""
-        return visitor.visit_ts_any(self)
+        return visitor.visit_operator(self)
     
     def compute(self, child_result: 'xr.DataArray') -> 'xr.DataArray':
         """Core computation logic for rolling any.

@@ -74,34 +74,3 @@ class Field(Expression):
         """
         return visitor.visit_field(self)
 
-
-@dataclass
-class AddOne(Expression):
-    """Mock operator: Adds 1 to the input expression.
-    
-    This is a demonstration operator to showcase the Visitor pattern with
-    composite expressions (operators with children).
-    
-    Attributes:
-        child: Child expression to evaluate first
-    
-    Example:
-        >>> expr = AddOne(Field('returns'))
-        >>> result = visitor.evaluate(expr)
-        >>> # Depth-first: visits Field('returns') first (step 0),
-        >>> # then AddOne (step 1)
-    """
-    child: Expression
-    
-    def accept(self, visitor):
-        """Accept visitor and delegate to visit_add_one().
-        
-        Args:
-            visitor: Visitor instance with visit_add_one() method
-        
-        Returns:
-            Result from visitor.visit_add_one(self)
-        """
-        return visitor.visit_add_one(self)
-
-

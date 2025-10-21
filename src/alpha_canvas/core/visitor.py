@@ -122,52 +122,27 @@ class EvaluateVisitor:
         self._cache_result(f"Field_{node.name}", result)
         return result
     
-    def visit_add_one(self, node) -> xr.DataArray:
-        """Visit AddOne node: add 1 to child expression result.
+    def visit_operator(self, node) -> xr.DataArray:
+        """Generic visitor for operators following compute() pattern.
         
-        This is a mock operator to demonstrate depth-first traversal.
-        It first evaluates the child expression (depth-first), then
-        adds 1 to the result.
+        This method implements the standard 3-step pattern for all operators:
+        1. Traverse tree (evaluate child/children)
+        2. Delegate computation to operator's compute()
+        3. Cache result
+        
+        All operators (TsMean, TsAny, Rank, etc.) use this single method,
+        eliminating code duplication entirely.
         
         Args:
-            node: AddOne expression node with 'child' attribute
+            node: Expression node with compute() method and child attribute
         
         Returns:
-            xarray.DataArray with child result + 1
+            DataArray result from operator's compute()
         
         Example:
-            >>> expr = AddOne(Field('returns'))
-            >>> result = expr.accept(visitor)
-            >>> # Step 0: Field('returns')
-            >>> # Step 1: AddOne (returns + 1)
-        """
-        # Depth-first: evaluate child first
-        child_result = node.child.accept(self)
-        
-        # Apply operation
-        result = child_result + 1
-        
-        # Cache this step
-        self._cache_result("AddOne", result)
-        
-        return result
-    
-    def visit_ts_mean(self, node: 'TsMean') -> xr.DataArray:
-        """Visit TsMean node: orchestrate traversal and caching.
-        
-        Visitor's role (3-step pattern):
-        1. Traverse tree (evaluate child)
-        2. Delegate computation to operator
-        3. Cache result
-        
-        The computation logic resides in TsMean.compute(), not here.
-        This follows the Separation of Concerns principle.
-        
-        Args:
-            node: TsMean expression node
-        
-        Returns:
-            DataArray with rolling mean applied (delegated to operator)
+            >>> # All operators call this via accept(visitor)
+            >>> expr = TsMean(child=Field('returns'), window=5)
+            >>> result = expr.accept(visitor)  # Calls visit_operator
         """
         # 1. Traversal: evaluate child expression
         child_result = node.child.accept(self)
@@ -176,35 +151,8 @@ class EvaluateVisitor:
         result = node.compute(child_result)
         
         # 3. State collection: cache result with step counter
-        self._cache_result("TsMean", result)
-        
-        return result
-    
-    def visit_ts_any(self, node: 'TsAny') -> xr.DataArray:
-        """Visit TsAny node: orchestrate traversal and caching.
-        
-        Visitor's role (3-step pattern):
-        1. Traverse tree (evaluate child)
-        2. Delegate computation to operator
-        3. Cache result
-        
-        The computation logic resides in TsAny.compute(), not here.
-        This follows the Separation of Concerns principle.
-        
-        Args:
-            node: TsAny expression node
-        
-        Returns:
-            Boolean DataArray indicating if any value in window is True
-        """
-        # 1. Traversal: evaluate child expression
-        child_result = node.child.accept(self)
-        
-        # 2. Delegation: operator does its own computation
-        result = node.compute(child_result)
-        
-        # 3. State collection: cache result with step counter
-        self._cache_result("TsAny", result)
+        operator_name = node.__class__.__name__
+        self._cache_result(operator_name, result)
         
         return result
     
