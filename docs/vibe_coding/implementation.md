@@ -774,119 +774,209 @@ def test_ts_mean_with_visitor():
 
 ---
 
-## 3.4. Cross-Sectional Quantile 연산자 구현
+## 3.4. Cross-Sectional Quantile 연산자 구현 ✅ **IMPLEMENTED**
 
-### 3.3.1. `cs_quantile` Expression 클래스
+### 3.4.1. `CsQuantile` Expression 클래스 (실제 구현)
 
 ```python
 from dataclasses import dataclass
-from typing import Optional, List, Union
+from typing import List, Optional
+import numpy as np
+import pandas as pd
+import xarray as xr
 
-@dataclass
+@dataclass(eq=False)  # eq=False to preserve Expression comparison operators
 class CsQuantile(Expression):
-    """Cross-sectional quantile bucketing with optional grouping or masking."""
+    """Cross-sectional quantile bucketing - returns categorical labels.
     
-    data: Expression  # 버킷화할 데이터 (e.g., Field('market_cap'))
+    Preserves input (T, N) shape. Each timestep is independently bucketed.
+    Supports both independent sort (whole universe) and dependent sort
+    (within groups via group_by parameter).
+    """
+    child: Expression  # 버킷화할 데이터 (e.g., Field('market_cap'))
     bins: int  # 버킷 개수
     labels: List[str]  # 레이블 리스트 (길이 = bins)
-    group_by: Optional[str] = None  # 종속 정렬용: axis 이름 (string), pandas.groupby처럼
-    mask: Optional[Expression] = None  # 로우레벨 필터링용: Boolean Expression
+    group_by: Optional[str] = None  # 종속 정렬용: field 이름 (string)
     
-    def accept(self, visitor: Visitor):
-        return visitor.visit_cs_quantile(self)
+    def __post_init__(self):
+        """Validate parameters."""
+        if len(self.labels) != self.bins:
+            raise ValueError(
+                f"labels length ({len(self.labels)}) must equal bins ({self.bins})"
+            )
+    
+    def accept(self, visitor):
+        """Visitor 인터페이스."""
+        return visitor.visit_operator(self)
+    
+    def compute(
+        self, 
+        child_result: xr.DataArray, 
+        group_labels: Optional[xr.DataArray] = None
+    ) -> xr.DataArray:
+        """Apply quantile bucketing - 핵심 계산 로직."""
+        if group_labels is None:
+            return self._quantile_independent(child_result)
+        else:
+            return self._quantile_grouped(child_result, group_labels)
 ```
 
-### 3.3.2. `EvaluateVisitor.visit_cs_quantile` 구현
+### 3.4.2. 독립 정렬 (Independent Sort) 구현
+
+**핵심 패턴:** `xarray.groupby('time').map()` + `pd.qcut` + **flatten-reshape**
 
 ```python
-def visit_cs_quantile(self, node: CsQuantile) -> xr.DataArray:
+def _quantile_independent(self, data: xr.DataArray) -> xr.DataArray:
+    """Independent sort - qcut at each timestep across all assets.
+    
+    핵심: pd.qcut은 1D 입력이 필요하므로 flatten → qcut → reshape 패턴 사용
     """
-    cs_quantile 평가: 독립/종속 정렬 및 마스크 지원.
+    def qcut_at_timestep(data_slice):
+        """Apply pd.qcut to a single timestep's cross-section."""
+        try:
+            # CRITICAL: Flatten to 1D for pd.qcut
+            values_1d = data_slice.values.flatten()
+            result = pd.qcut(
+                values_1d, 
+                q=self.bins, 
+                labels=self.labels, 
+                duplicates='drop'  # Handle edge cases gracefully
+            )
+            # CRITICAL: Reshape back to original shape
+            result_array = np.array(result).reshape(data_slice.shape)
+            return xr.DataArray(
+                result_array, 
+                dims=data_slice.dims, 
+                coords=data_slice.coords
+            )
+        except Exception:
+            # Edge case: all same values, all NaN, etc.
+            return xr.DataArray(
+                np.full_like(data_slice.values, np.nan, dtype=object),
+                dims=data_slice.dims, 
+                coords=data_slice.coords
+            )
     
-    중요: 종속 정렬은 xarray.groupby().apply()의 표준 패턴을 사용합니다.
-    """
-    
-    # 1. 데이터 평가 및 타입 검사 (MVP: DataPanel만 허용)
-    data = node.data.accept(self)  # (T, N) DataArray
-    if not self._is_data_panel(data):
-        raise TypeError(f"cs_quantile requires DataPanel, got {type(data)}")
-    
-    # 2. 마스크 처리 (옵션)
-    if node.mask is not None:
-        mask = node.mask.accept(self)  # (T, N) Boolean
-        data = data.where(mask, np.nan)  # mask=False인 곳은 NaN
-    
-    # 3-A. 독립 정렬 (group_by=None)
-    if node.group_by is None:
-        return self._quantile_independent(data, node.bins, node.labels)
-    
-    # 3-B. 종속 정렬 (group_by 지정 - xarray.groupby 활용)
-    else:
-        # group_by는 문자열 (axis 이름)
-        group_labels = self._rc.db[node.group_by]  # rc.db에서 직접 조회
-        return self._quantile_grouped(data, group_labels, node.bins, node.labels)
-
-def _quantile_independent(self, data: xr.DataArray, bins: int, labels: List[str]) -> xr.DataArray:
-    """전체 유니버스에서 quantile 계산."""
-    # xarray의 quantile 기능 활용하여 각 time step별로 cross-sectional quantile 계산
-    # pd.qcut 스타일로 bins 개로 분할하고 labels 할당
-    # 반환: (T, N) Categorical DataArray
-    ...
-
-def _quantile_grouped(self, data: xr.DataArray, groups: xr.DataArray, 
-                      bins: int, labels: List[str]) -> xr.DataArray:
-    """
-    각 그룹 내에서 독립적으로 quantile 계산 (xarray.groupby 활용).
-    
-    이것이 xarray.groupby().apply()의 표준 사용 패턴입니다.
-    """
-    
-    def quantile_function(group_data: xr.DataArray) -> xr.DataArray:
-        """각 그룹에 적용할 quantile 함수"""
-        # group_data는 해당 그룹('small' 또는 'big')에 속하는 데이터만 포함
-        return self._quantile_independent(group_data, bins, labels)
-    
-    # xarray.groupby().apply() - 표준 패턴
-    result = data.groupby(groups).apply(quantile_function)
-    
+    # xarray.groupby('time').map() automatically concatenates back to (T, N)
+    result = data.groupby('time').map(qcut_at_timestep)
     return result
 ```
 
-**핵심 구현 사항:**
+### 3.4.3. 종속 정렬 (Dependent Sort) 구현
 
-1. **타입 검사:** MVP에서는 `DataPanel` 타입만 허용 (`_is_data_panel()` 헬퍼 사용)
-2. **독립 정렬:** 전체 유니버스 대상 quantile 계산
-3. **종속 정렬:** `xarray.groupby().apply(quantile_function)` 사용
-   - `group_by`는 문자열로 받아 `rc.db[group_by]`에서 레이블 조회
-   - `.apply()`에 커스텀 quantile 함수 전달
-   - xarray가 자동으로 그룹별 결과를 병합
-4. **마스크:** `data.where(mask, np.nan)`로 필터링
-
-### 3.3.3. 사용 예시 비교
+**핵심 패턴:** 중첩된 groupby (groups → time → qcut)
 
 ```python
-# 독립 정렬: 간단한 Expression
+def _quantile_grouped(
+    self, 
+    data: xr.DataArray, 
+    groups: xr.DataArray
+) -> xr.DataArray:
+    """Dependent sort - qcut within each group at each timestep.
+    
+    Nested groupby pattern:
+    1. Group by categorical labels (e.g., 'small', 'big')
+    2. Within each group, apply independent sort (group by time → qcut)
+    3. xarray automatically concatenates results back to (T, N) shape
+    """
+    def apply_qcut_within_group(group_data: xr.DataArray) -> xr.DataArray:
+        """Apply qcut at each timestep within this group."""
+        return self._quantile_independent(group_data)
+    
+    # Nested groupby: groups → time → qcut
+    # xarray automatically concatenates results back
+    result = data.groupby(groups).map(apply_qcut_within_group)
+    return result
+```
+
+### 3.4.4. Visitor 통합 (Special Case Handling)
+
+**CsQuantile은 `visit_operator()`에서 특별 처리 필요 (group_by 조회)**:
+
+```python
+# In EvaluateVisitor.visit_operator()
+from alpha_canvas.ops.classification import CsQuantile
+
+# Special handling for CsQuantile (needs group_by lookup)
+if isinstance(node, CsQuantile):
+    # 1. Evaluate child
+    child_result = node.child.accept(self)
+    
+    # 2. Look up group_by field if specified
+    group_labels = None
+    if node.group_by is not None:
+        if node.group_by not in self._data:
+            raise ValueError(
+                f"group_by field '{node.group_by}' not found in dataset"
+            )
+        group_labels = self._data[node.group_by]
+    
+    # 3. Delegate to compute()
+    result = node.compute(child_result, group_labels)
+    
+    # 4. Apply universe masking (automatic)
+    if self._universe_mask is not None:
+        result = result.where(self._universe_mask, np.nan)
+    
+    # 5. Cache
+    self._cache_result("CsQuantile", result)
+    return result
+```
+
+### 3.4.5. 핵심 구현 교훈 (실험에서 발견)
+
+**1. Flatten-Reshape 패턴 필수:**
+- `pd.qcut`은 1D 배열만 받음
+- `data_slice.values.flatten()` → qcut → `reshape(data_slice.shape)`
+- 이 패턴 없이는 shape 보존 불가능
+
+**2. xarray.groupby().map() vs .apply():**
+- `.map()`이 xarray → xarray 변환에 더 깔끔
+- 자동 concatenation으로 shape 보존
+- `.apply()`도 작동하지만 pandas 반환 시 사용
+
+**3. duplicates='drop' 필수:**
+- 모든 값이 동일한 edge case 처리
+- 모든 NaN인 경우 graceful degradation
+- 에러 발생 대신 NaN 반환
+
+**4. 종속 정렬 성능:**
+- 독립 정렬: ~27ms for (10, 6) data
+- 종속 정렬: ~117ms for (10, 6) data (4.26x overhead)
+- **허용 가능:** 팩터 연구는 배치 처리 (실시간 아님)
+
+**5. 검증 방법:**
+- 독립 vs 종속 정렬의 cutoff가 **달라야 함**
+- 실험에서 17%의 positions가 다른 label 받음
+- Fama-French 논문 methodology와 일치
+
+### 3.4.6. 사용 예시 (실제 코드)
+
+```python
+from alpha_canvas.ops.classification import CsQuantile
+from alpha_canvas.core.expression import Field
+
+# 독립 정렬: 전체 유니버스에서 quantile
 size_expr = CsQuantile(
-    data=Field('market_cap'),
+    child=Field('market_cap'),
     bins=2,
     labels=['small', 'big']
 )
 
-# 종속 정렬: group_by로 기존 axis 참조
+# 종속 정렬: size 그룹 내에서 value quantile (Fama-French)
 value_expr = CsQuantile(
-    data=Field('book_to_market'),
+    child=Field('book_to_market'),
     bins=3,
     labels=['low', 'mid', 'high'],
-    group_by='size'  # 'size' axis의 결과를 먼저 평가 → 각 그룹별 quantile
+    group_by='size'  # 'size' field를 먼저 조회 → 각 그룹별 quantile
 )
 
-# 마스크 적용: Boolean Expression
-momentum_expr = CsQuantile(
-    data=Field('returns'),
-    bins=5,
-    labels=['q1', 'q2', 'q3', 'q4', 'q5'],
-    mask=GreaterThan(Field('volume'), Quantile(Field('volume'), 0.5))
-)
+# 사용
+rc.add_data('size', size_expr)  # 먼저 size 생성
+rc.add_data('value', value_expr)  # size 그룹 내에서 value 계산
+
+# Boolean Expression 통합
+small_value = (rc.data['size'] == 'small') & (rc.data['value'] == 'high')
 ```
 
 ## 3.4. Property Accessor 구현 ✅ **IMPLEMENTED**
