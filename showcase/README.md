@@ -18,6 +18,7 @@ poetry run python showcase/08_rank_market_cap.py
 poetry run python showcase/09_universe_masking.py
 poetry run python showcase/10_boolean_expressions.py
 poetry run python showcase/11_data_accessor.py
+poetry run python showcase/12_cs_quantile.py
 ```
 
 Or run all showcases in sequence:
@@ -146,6 +147,17 @@ poetry run python showcase/run_all.py
 
 **Key Features**: DataAccessor, Expression-based selectors, lazy field access, integrated Phase 7A+7B, simplified design
 
+### 12. cs_quantile - Cross-Sectional Quantile Bucketing (`12_cs_quantile.py`)
+- Independent sort: Quantile bucketing across entire universe
+- Dependent sort: Quantile bucketing within groups (Fama-French methodology)
+- Shape preservation: `(T, N)` input → `(T, N)` categorical output
+- Categorical labels: 'small'/'big', 'low'/'mid'/'high'
+- Integration with Boolean Expressions: `rc.data['size'] == 'small'`
+- Multi-dimensional portfolio construction (2×3 Fama-French portfolios)
+- Different cutoffs per group (validates correct dependent sort behavior)
+
+**Key Features**: cs_quantile operator, independent vs dependent sort, Fama-French portfolios, quantile bucketing, xarray groupby with shape preservation
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:
@@ -159,15 +171,16 @@ All showcases should complete with `[SUCCESS]` verdicts, demonstrating that the 
 ## Foundation Test Results
 
 The complete MVP foundation has:
-- ✅ **110 tests passing** (100% success rate)
-- ✅ **15 experiments validated** (all SUCCESS)
-- ✅ **12 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor
+- ✅ **123 tests passing** (100% success rate)
+- ✅ **16 experiments validated** (all SUCCESS)
+- ✅ **13 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile
 - ✅ **Production-ready** architecture (Facade, Composite, Visitor patterns)
 - ✅ **Data pipeline**: Parquet → DuckDB → xarray → AlphaCanvas (~5.38ms per field)
-- ✅ **Operator library**: TsMean, TsAny, Rank, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
+- ✅ **Operator library**: TsMean, TsAny, Rank, CsQuantile, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
 - ✅ **Universe masking**: Automatic double-masking with 13.6% overhead
 - ✅ **Boolean Expressions**: Lazy evaluation with Expression-based comparisons
 - ✅ **Selector Interface**: `rc.data` accessor with Field Expressions (Phase 7B)
+- ✅ **Quantile Bucketing**: Independent and dependent sort for Fama-French portfolios
 
 ---
 
