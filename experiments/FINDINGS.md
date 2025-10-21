@@ -1734,10 +1734,235 @@ result = data.groupby(size_labels).map(apply_qcut_within_group)
 #### Next Steps
 
 1. ✅ Experiment validated shape preservation pattern
-2. **TODO**: Write TDD tests in `tests/test_ops/test_classification.py`
-3. **TODO**: Implement `CsQuantile` class in `src/alpha_canvas/ops/classification.py`
-4. **TODO**: Update Visitor to handle `CsQuantile` special case
-5. **TODO**: Create showcase demonstrating Fama-French portfolio construction
-6. **TODO**: Update documentation if patterns changed
+2. ✅ Write TDD tests in `tests/test_ops/test_classification.py`
+3. ✅ Implement `CsQuantile` class in `src/alpha_canvas/ops/classification.py`
+4. ✅ Update Visitor to handle `CsQuantile` special case
+5. ✅ Create showcase demonstrating Fama-French portfolio construction
+6. ✅ Update documentation
+
+---
+
+## Phase 14: Signal Canvas Assignment (Lazy Evaluation)
+
+### Experiment 17: Lazy vs Immediate Assignment Patterns
+
+**Date**: 2025-01-21  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated two design patterns for Expression-based signal assignment. Lazy evaluation preserves full Expression tree for traceability (critical for PnL tracking) with negligible performance overhead. Recommended lazy evaluation for implementation.
+
+#### Key Discoveries
+
+1. **Lazy Evaluation Preserves Traceability**
+   - **Pattern**: Store assignments as `List[(mask_expr, value)]` tuples
+   - **Benefit**: Full Expression tree preserved for step-by-step PnL tracking
+   - **Critical**: Can cache base result (step N) and final result (step N+1) separately
+   - **Essential**: Enables `rc.trace_pnl()` and `rc.get_intermediate()` functionality
+
+2. **Performance Comparison**
+   - **Lazy average**: 8.9ms (all 4 scenarios)
+   - **Immediate average**: 6.5ms (all 4 scenarios)
+   - **Difference**: 2.5ms slower (27.5%), but absolute difference negligible
+   - **Conclusion**: Performance not a concern for factor research (batch processing)
+
+3. **Memory Footprint**
+   - **Lazy**: 88 bytes (assignment list storage)
+   - **Immediate**: 104 bytes (full DataArray cached)
+   - **Winner**: Lazy (lower memory footprint)
+   - **Impact**: Minimal difference, both acceptable
+
+4. **Flexibility Comparison**
+   - **Lazy**: High flexibility
+     - Can inspect assignments before evaluation
+     - Can modify/remove assignments
+     - Can re-evaluate with different data
+   - **Immediate**: Low flexibility
+     - Assignments applied immediately (no inspection)
+     - Cannot modify after application
+     - Data cached (cannot re-evaluate)
+   - **Winner**: Lazy (much higher flexibility for research workflows)
+
+5. **Overlapping Masks Behavior**
+   - Sequential application: Later assignment overwrites earlier
+   - Example: `mask1` sets positions A, B, C to 1.0, then `mask2` sets B, C, D to -1.0
+   - Result: B and C are -1.0 (later wins), A is 1.0, D is -1.0
+   - **Validation**: Both patterns produce identical results
+
+6. **Universe Integration**
+   - Universe masking applied AFTER all assignments
+   - Assignments outside universe automatically become NaN
+   - No special handling needed - existing double-masking strategy works
+   - **Validation**: Positions outside universe are NaN in final result
+
+#### Implementation Pattern Established
+
+**Lazy Evaluation Pattern**:
+
+```python
+class Expression:
+    def __init__(self):
+        self._assignments = []  # List of (mask_expr, value) tuples
+    
+    def __setitem__(self, mask, value):
+        """Store assignment for lazy evaluation."""
+        self._assignments.append((mask, value))
+
+# Usage:
+signal = ts_mean(Field('returns'), 3)  # Expression (lazy)
+signal[mask1] = 1.0  # Stored, not evaluated
+signal[mask2] = -1.0  # Stored, not evaluated
+result = rc.add_data('signal', signal)  # NOW everything is evaluated
+```
+
+**Visitor Evaluation Flow**:
+
+```python
+def evaluate(self, expr: Expression) -> xr.DataArray:
+    # Step 1: Evaluate base Expression
+    base_result = expr.accept(self)
+    
+    # Step 2: Cache base result (before assignments)
+    if expr._assignments:
+        self._cache_result(f"{expr.__class__.__name__}_base", base_result)
+    
+    # Step 3: Apply assignments sequentially
+    if expr._assignments:
+        final_result = self._apply_assignments(base_result, expr._assignments)
+        
+        # Step 4: Apply universe masking
+        if self._universe_mask is not None:
+            final_result = final_result.where(self._universe_mask, np.nan)
+        
+        # Step 5: Cache final result
+        self._cache_result(f"{expr.__class__.__name__}_final", final_result)
+        return final_result
+    
+    return base_result
+
+def _apply_assignments(self, base_result, assignments):
+    """Apply assignment list to base result."""
+    result = base_result.copy()
+    for mask_expr, value in assignments:
+        mask_data = self.evaluate(mask_expr) if isinstance(mask_expr, Expression) else mask_expr
+        result = result.where(~mask_data, value)  # Replace where mask is True
+    return result
+```
+
+#### Test Scenarios Validated
+
+1. **Simple Assignment** (zeros → long/short)
+   - Start from constant 0.0
+   - Assign 1.0 to small-cap, -1.0 to large-cap
+   - Result: Correct long/short positions
+   - ✓ Both patterns produce identical results
+
+2. **Transform Existing Signal** (ts_mean → boost high momentum)
+   - Start from ts_mean(returns, 10)
+   - Boost high momentum positions to 2.0
+   - Result: High momentum replaced, others unchanged
+   - ✓ Both patterns produce identical results
+
+3. **Overlapping Masks** (later wins)
+   - mask1 assigns 1.0 to positions [0, 1, 2]
+   - mask2 assigns -1.0 to positions [1, 2, 3]
+   - Result: Overlap [1, 2] gets -1.0 (later wins)
+   - ✓ Sequential application works correctly
+
+4. **Multiple Sequential Modifications** (3 assignments)
+   - Start from ts_mean, apply 3 different assignments
+   - Result: All 3 modifications applied correctly
+   - ✓ No interference between assignments
+
+5. **Universe Masking Integration**
+   - Assign to all positions (including outside universe)
+   - Result: Outside-universe positions are NaN
+   - ✓ Universe masking works correctly with assignments
+
+#### Performance Metrics
+
+| Scenario | Lazy (ms) | Immediate (ms) | Difference |
+|----------|-----------|----------------|------------|
+| Simple assignment | 4.8 | 4.1 | +0.7ms |
+| Transform existing | 15.6 | 10.4 | +5.2ms |
+| Overlapping masks | - | - | - |
+| Multiple sequential | 12.4 | 7.2 | +5.2ms |
+| **Average** | **8.9** | **6.5** | **+2.5ms (27.5%)** |
+
+**Conclusion**: Lazy is slightly slower, but 2.5ms difference is negligible for batch processing.
+
+#### Recommendation: LAZY EVALUATION
+
+**Reasons**:
+
+1. **Traceability** (Most Important)
+   - Full Expression tree preserved
+   - Can cache base and final results separately
+   - Essential for rc.trace_pnl() step-by-step tracking
+   - Critical for quantitative research debugging
+
+2. **Flexibility**
+   - Can inspect assignments before evaluation
+   - Can modify/remove assignments
+   - Can re-evaluate with different data
+   - Better for research workflows
+
+3. **Memory**
+   - Lower footprint (88 bytes vs 104 bytes)
+   - Assignment list is lightweight
+
+4. **Architecture Consistency**
+   - Aligns with lazy evaluation philosophy
+   - Expression = computation recipe (no data until evaluate)
+   - Visitor = evaluation engine
+   - No violation of design principles
+
+5. **Performance**
+   - 2.5ms overhead is negligible
+   - Factor research is batch processing (not real-time)
+   - Can optimize later if needed
+
+**Trade-offs**:
+- Immediate evaluation is 27.5% faster
+- But lazy evaluation provides essential traceability
+- Performance difference too small to matter
+
+#### Lessons Learned
+
+1. **Traceability Trumps Performance**
+   - 2.5ms slower is acceptable for research platform
+   - Full Expression tree is invaluable for debugging
+   - Step-by-step PnL tracking requires lazy evaluation
+
+2. **Lazy Evaluation is Not "Free"**
+   - 27.5% overhead exists
+   - But in absolute terms (2.5ms), it's negligible
+   - Trade-off heavily favors lazy for research use case
+
+3. **Flexibility Enables Research**
+   - Being able to inspect assignments is valuable
+   - Modifying assignments without re-computation helps iteration
+   - Research platforms need flexibility over raw speed
+
+4. **Sequential Application is Simple**
+   - Later assignment overwrites earlier for overlaps
+   - Easy to understand and reason about
+   - No complex merge logic needed
+
+5. **Universe Integration is Clean**
+   - Apply universe masking after all assignments
+   - No special handling needed
+   - Existing double-masking strategy works perfectly
+
+#### Next Steps
+
+1. ✅ Experiment validated lazy evaluation pattern
+2. **IN PROGRESS**: Write TDD tests for Expression.__setitem__
+3. **TODO**: Implement assignment storage in Expression base class
+4. **TODO**: Implement _apply_assignments in Visitor
+5. **TODO**: Modify evaluate() to handle assignments
+6. **TODO**: Create Constant expression class
+7. **TODO**: Run tests until all pass (green phase)
+8. **TODO**: Create showcase demonstrating all patterns
+9. **TODO**: Update documentation
 
 ---
