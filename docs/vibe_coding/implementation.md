@@ -367,8 +367,8 @@ alpha_expr = group_neutralize(
 # 3. Expression을 변수로 등록
 rc.add_data_var('alpha1', alpha_expr)
 
-# 4. 데이터 접근
-alpha1_data = rc.data.alpha1  # xarray.DataArray (T, N)
+# 4. 데이터 접근 (evaluated data)
+alpha1_data = rc.db['alpha1']  # xarray.DataArray (T, N)
 ```
 
 **구현 요구사항:**
@@ -389,14 +389,14 @@ rc.add_data('mcap', Field('market_cap'))
 rc.add_data('ret', Field('returns'))
 rc.add_data('vol', Field('volume'))
 
-# 3. 가상 축(Axis) 정의 - 레이블 기반 버킷
-rc.add_data('size', cs_quantile(rc.data.mcap, bins=3, labels=['small', 'mid', 'big']))
-rc.add_data('momentum', cs_quantile(rc.data.ret, bins=2, labels=['low', 'high']))
-rc.add_data('surge', ts_any(rc.data.ret > 0.3, window=252))  # Boolean
+# 3. 분류 데이터 정의 - 레이블 기반 버킷
+rc.add_data('size', cs_quantile(rc.data['mcap'], bins=3, labels=['small', 'mid', 'big']))
+rc.add_data('momentum', cs_quantile(rc.data['ret'], bins=2, labels=['low', 'high']))
+rc.add_data('surge', ts_any(rc.data['ret'] > 0.3, window=252))  # Boolean
 
-# 4. 셀렉터로 Boolean 마스크 생성
-mask_long = (rc.axis.size['small'] & rc.axis.momentum['high'] & rc.axis.surge)
-mask_short = (rc.axis.size['big'] & rc.axis.momentum['low'])
+# 4. 비교 연산으로 Boolean 마스크 생성
+mask_long = (rc.data['size'] == 'small') & (rc.data['momentum'] == 'high') & (rc.data['surge'] == True)
+mask_short = (rc.data['size'] == 'big') & (rc.data['momentum'] == 'low')
 
 # 5. NumPy-style 할당
 rc['my_alpha'][mask_long] = 1.0
@@ -405,8 +405,8 @@ rc['my_alpha'][mask_short] = -1.0
 # 또는 현재 활성 캔버스에 직접 할당
 rc[mask_long] = 1.0
 
-# 6. 최종 시그널 접근
-my_alpha = rc.data.my_alpha  # xarray.DataArray (T, N)
+# 6. 최종 시그널 접근 (evaluated data)
+my_alpha = rc.db['my_alpha']  # xarray.DataArray (T, N)
 ```
 
 **구현 요구사항:**
