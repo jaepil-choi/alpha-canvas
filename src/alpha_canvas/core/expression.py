@@ -24,6 +24,11 @@ class Expression(ABC):
     - Logical operators (&, |, ~) combine Boolean Expressions
     - All operations remain lazy until evaluated through Visitor
     
+    Signal Assignment Support (Lazy Evaluation):
+    - __setitem__ stores assignment operations as (mask, value) tuples
+    - Assignments are applied during evaluation by Visitor
+    - Later assignments overwrite earlier ones for overlapping positions
+    
     Example:
         >>> # Leaf node
         >>> field = Field('returns')
@@ -35,9 +40,39 @@ class Expression(ABC):
         >>> size = Field('size')
         >>> mask = size == 'small'  # Creates Equals Expression
         >>> 
+        >>> # Signal assignment (lazy)
+        >>> signal = Field('returns')
+        >>> signal[mask] = 1.0  # Stored, not evaluated
+        >>> 
         >>> # Evaluate with visitor
-        >>> result = visitor.evaluate(mask)
+        >>> result = visitor.evaluate(signal)
     """
+    
+    def __setitem__(self, mask, value):
+        """Store assignment for lazy evaluation.
+        
+        Args:
+            mask: Boolean Expression or DataArray indicating where to assign
+            value: Scalar value to assign where mask is True
+        
+        Note:
+            Assignments are stored as (mask, value) tuples and applied sequentially
+            during evaluation. Later assignments overwrite earlier ones for overlapping
+            positions.
+            
+            Uses lazy initialization - _assignments list is created on first use.
+        
+        Example:
+            >>> signal = Field('returns')
+            >>> signal[Field('size') == 'small'] = 1.0
+            >>> signal[Field('size') == 'big'] = -1.0
+            >>> # Assignments stored, not evaluated
+        """
+        # Lazy initialization - create _assignments if it doesn't exist
+        if not hasattr(self, '_assignments'):
+            self._assignments = []
+        
+        self._assignments.append((mask, value))
     
     @abstractmethod
     def accept(self, visitor):
