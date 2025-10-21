@@ -262,34 +262,92 @@ def add_data(self, name: str, data: Union[Expression, xr.DataArray]) -> None:
 
 ---
 
-#### D. `rc.axis` Accessor 구현 (Selector Interface) 📋 **PLANNED**
+#### D. `rc.data` Accessor 구현 (Selector Interface) ✅ **IMPLEMENTED**
+
+**설계 철학**: Expression 기반 필드 접근으로 지연 평가 및 유니버스 안전성 보장
 
 ```python
-class AxisAccessor:
-    """rc.axis.size['small'] → (rc.db['size'] == 'small')로 변환"""
-    
-    def __init__(self, rc: 'AlphaCanvas'):
-        self._rc = rc
-    
-    def __getattr__(self, axis_name: str) -> 'AxisSelector':
-        if axis_name not in self._rc.db:
-            raise AttributeError(f"Axis '{axis_name}' not found in rc.db")
-        return AxisSelector(self._rc.db[axis_name])
+from alpha_canvas.core.expression import Field
 
-class AxisSelector:
-    def __init__(self, data_var: xr.DataArray):
-        self._data_var = data_var
+
+class DataAccessor:
+    """rc.data accessor that returns Field Expressions.
     
-    def __getitem__(self, label: str) -> xr.DataArray:
-        # 표준 xarray 불리언 인덱싱
-        return (self._data_var == label)
+    This enables Expression-based data access:
+        rc.data['field_name'] → Field('field_name')
+        rc.data['size'] == 'small' → Equals(Field('size'), 'small')
+    
+    Field Expressions remain lazy until explicitly evaluated,
+    ensuring universe masking through the Visitor pattern.
+    """
+    
+    def __getitem__(self, field_name: str) -> Field:
+        """Return Field Expression for the given field name.
+        
+        Args:
+            field_name: Name of the field to access
+            
+        Returns:
+            Field Expression wrapping the field name
+            
+        Raises:
+            TypeError: If field_name is not a string
+        """
+        if not isinstance(field_name, str):
+            raise TypeError(
+                f"Field name must be string, got {type(field_name).__name__}"
+            )
+        
+        return Field(field_name)
+    
+    def __getattr__(self, name: str):
+        """Prevent attribute access - only item access allowed.
+        
+        This ensures a single, consistent access pattern.
+        """
+        raise AttributeError(
+            f"DataAccessor does not support attribute access. "
+            f"Use rc.data['{name}'] instead of rc.data.{name}"
+        )
+```
+
+**AlphaCanvas 통합**:
+
+```python
+class AlphaCanvas:
+    def __init__(self, ...):
+        # ... existing init ...
+        self._data_accessor = DataAccessor()  # Create once, reuse
+    
+    @property
+    def data(self) -> DataAccessor:
+        """Access data fields as Field Expressions."""
+        return self._data_accessor
 ```
 
 **핵심 사항:**
 
-- `rc.axis.size['small']`은 단순한 syntactic sugar
-- 실제로는 `(rc.db['size'] == 'small')`이라는 표준 xarray 연산
-- 별도의 Expression 생성 없이 즉시 Boolean mask 반환
+- ✅ **Expression 반환**: `rc.data['size']` → `Field('size')` (lazy)
+- ✅ **Lazy 평가**: 명시적 `rc.evaluate()` 호출 전까지 평가 안 됨
+- ✅ **유니버스 안전**: 모든 Expression은 Visitor를 통해 평가되어 유니버스 마스킹 보장
+- ✅ **Composable**: `ts_mean(rc.data['returns'], 10)` 같은 체이닝 가능
+- ✅ **Item access only**: `rc.data['field']`만 지원, `rc.data.field`는 에러
+- ✅ **통합**: Phase 7A Boolean Expression과 완벽 통합
+
+**사용 패턴**:
+
+```python
+# ✅ Correct pattern (Expression-based)
+mask = rc.data['size'] == 'small'  # Returns Equals Expression
+result = rc.evaluate(mask)         # Evaluates with universe masking
+
+# ✅ Complex pattern
+mask = (rc.data['size'] == 'small') & (rc.data['momentum'] == 'high')
+result = rc.evaluate(mask)
+
+# ❌ Wrong pattern (not supported)
+mask = rc.data.size == 'small'  # AttributeError
+```
 
 ### 3.2.3. Interface A: Formula-based (Excel-like)
 
@@ -354,11 +412,11 @@ my_alpha = rc.data.my_alpha  # xarray.DataArray (T, N)
 **구현 요구사항:**
 
 - `rc.add_data('size', expr)`: Expression을 평가하고 `rc.db.assign({'size': result})`로 data_vars에 추가
-- `rc.axis.size['small']`:
-  1. `AxisAccessor`가 `rc.db['size']`에 접근
-  2. `AxisSelector.__getitem__('small')`이 `(rc.db['size'] == 'small')`을 반환
-  3. 표준 xarray 불리언 인덱싱, Expression 생성 없음
-- `rc[mask] = value`: `xr.where(mask, value, rc.db[current_canvas])`로 할당
+- `rc.data['size'] == 'small'`:
+  1. `rc.data['size']` → `Field('size')` Expression 반환
+  2. `Field('size') == 'small'` → `Equals(Field('size'), 'small')` Expression 반환
+  3. Expression은 lazy하게 유지, `rc.evaluate(expr)`로 평가
+- `rc[mask] = value`: `xr.where(mask, value, rc.db[current_canvas])`로 할당 (미구현)
 
 ### 3.2.4. Interface C: Selective Traceability (Integer-Based Steps)
 
@@ -831,33 +889,53 @@ momentum_expr = CsQuantile(
 )
 ```
 
-## 3.4. Property Accessor 구현
+## 3.4. Property Accessor 구현 ✅ **IMPLEMENTED**
 
 ```python
-# rc.data: DataAccessor
+from alpha_canvas.core.expression import Field
+
+
 class DataAccessor:
-    def __init__(self, db: xr.Dataset):
-        self._db = db
+    """Returns Field Expressions for lazy evaluation."""
     
-    def __getattr__(self, name: str) -> xr.DataArray:
-        if name in self._db:
-            return self._db[name]
-        raise AttributeError(f"Data '{name}' not found")
-
-# rc.axis: AxisAccessor
-class AxisAccessor:
-    def __init__(self, rc: 'AlphaCanvas'):
-        self._rc = rc
+    def __getitem__(self, field_name: str) -> Field:
+        """Return Field Expression (not raw data!)"""
+        if not isinstance(field_name, str):
+            raise TypeError(
+                f"Field name must be string, got {type(field_name).__name__}"
+            )
+        return Field(field_name)
     
-    def __getattr__(self, axis_name: str) -> 'AxisSelector':
-        if axis_name not in self._rc.rules:
-            raise AttributeError(f"Axis '{axis_name}' not defined")
-        return AxisSelector(self._rc, axis_name)
+    def __getattr__(self, name: str):
+        """Prevent attribute access - item access only."""
+        raise AttributeError(
+            f"DataAccessor does not support attribute access. "
+            f"Use rc.data['{name}'] instead of rc.data.{name}"
+        )
 
-class AxisSelector:
-    def __getitem__(self, label: str) -> xr.DataArray:
-        # rc.rules에서 Expression 조회 → Equals(..., label) 생성 → 평가
-        ...
+
+# AlphaCanvas 통합
+class AlphaCanvas:
+    def __init__(self, ...):
+        self._data_accessor = DataAccessor()
+    
+    @property
+    def data(self) -> DataAccessor:
+        """Access data fields as Field Expressions."""
+        return self._data_accessor
+```
+
+**사용 예시**:
+
+```python
+# Basic field access
+field = rc.data['size']  # Returns Field('size')
+
+# Comparison creates Expression
+mask = rc.data['size'] == 'small'  # Returns Equals Expression
+
+# Evaluate
+result = rc.evaluate(mask)  # Boolean DataArray with universe masking
 ```
 
 ## 3.5. 개발 원칙
