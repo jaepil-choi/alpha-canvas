@@ -140,29 +140,60 @@ class EvaluateVisitor:
         3. Apply universe mask to output (output masking)
         4. Cache result
         
-        All operators (TsMean, TsAny, Rank, etc.) use this single method,
+        All operators (TsMean, TsAny, Rank, Boolean, etc.) use this single method,
         eliminating code duplication entirely.
+        
+        Handles multiple operator patterns:
+        - Single child: TsMean, Rank, Not (has 'child' attribute)
+        - Binary: And, Or (has 'left' and 'right' attributes)
+        - Comparison: Equals, GreaterThan (has 'left' and 'right', right may be literal)
         
         The double masking strategy (Field input + Operator output) creates
         a trust chain where operators trust their input is masked and ensure
         their output is also masked.
         
         Args:
-            node: Expression node with compute() method and child attribute
+            node: Expression node with compute() method and child/children attributes
         
         Returns:
             DataArray result from operator's compute() (with universe applied)
         
         Example:
-            >>> # All operators call this via accept(visitor)
+            >>> # Single child operator
             >>> expr = TsMean(child=Field('returns'), window=5)
-            >>> result = expr.accept(visitor)  # Calls visit_operator
+            >>> result = expr.accept(visitor)
+            >>> 
+            >>> # Binary operator
+            >>> small = Field('size') == 'small'
+            >>> high = Field('value') == 'high'
+            >>> mask = small & high  # And(small, high)
+            >>> result = mask.accept(visitor)
         """
-        # 1. Traversal: evaluate child expression (child already masked from Field or previous operator)
-        child_result = node.child.accept(self)
+        from alpha_canvas.core.expression import Expression
         
-        # 2. Delegation: operator does its own computation
-        result = node.compute(child_result)
+        # 1. Traversal: evaluate child/children expressions
+        if hasattr(node, 'child'):
+            # Single child operator (TsMean, Rank, Not)
+            child_result = node.child.accept(self)
+            result = node.compute(child_result)
+        
+        elif hasattr(node, 'left') and hasattr(node, 'right'):
+            # Binary operator (And, Or, Equals, GreaterThan, etc.)
+            left_result = node.left.accept(self)
+            
+            # Check if right is Expression or literal
+            if isinstance(node.right, Expression):
+                right_result = node.right.accept(self)
+                result = node.compute(left_result, right_result)
+            else:
+                # Right is literal (e.g., 'small', 5.0)
+                result = node.compute(left_result)
+        
+        else:
+            # Fallback: assume single child
+            # This shouldn't happen if operators are properly defined
+            child_result = node.child.accept(self)
+            result = node.compute(child_result)
         
         # 3. OUTPUT MASKING: Apply universe to operator result
         if self._universe_mask is not None:
