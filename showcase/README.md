@@ -17,6 +17,7 @@ poetry run python showcase/07_ts_any_surge_detection.py
 poetry run python showcase/08_rank_market_cap.py
 poetry run python showcase/09_universe_masking.py
 poetry run python showcase/10_boolean_expressions.py
+poetry run python showcase/11_data_accessor.py
 ```
 
 Or run all showcases in sequence:
@@ -134,6 +135,17 @@ poetry run python showcase/run_all.py
 
 **Key Features**: Boolean Expression operators, lazy comparison, Visitor pattern integration, Expression-based selector foundation
 
+### 11. DataAccessor - Selector Interface (`11_data_accessor.py`)
+- `rc.data` accessor returning Field Expressions
+- Lazy evaluation: `rc.data['size'] == 'small'` creates Expression
+- Complex logical chains with `&`, `|`, `~` operators
+- Multi-dimensional selection (Fama-French style)
+- Numeric and categorical comparisons
+- Evaluation with universe masking
+- Pythonic syntax without special "axis" accessor
+
+**Key Features**: DataAccessor, Expression-based selectors, lazy field access, integrated Phase 7A+7B, simplified design
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:
@@ -147,14 +159,15 @@ All showcases should complete with `[SUCCESS]` verdicts, demonstrating that the 
 ## Foundation Test Results
 
 The complete MVP foundation has:
-- ✅ **100 tests passing** (100% success rate)
-- ✅ **14 experiments validated** (all SUCCESS)
-- ✅ **11 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions
+- ✅ **110 tests passing** (100% success rate)
+- ✅ **15 experiments validated** (all SUCCESS)
+- ✅ **12 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor
 - ✅ **Production-ready** architecture (Facade, Composite, Visitor patterns)
 - ✅ **Data pipeline**: Parquet → DuckDB → xarray → AlphaCanvas (~5.38ms per field)
 - ✅ **Operator library**: TsMean, TsAny, Rank, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
 - ✅ **Universe masking**: Automatic double-masking with 13.6% overhead
 - ✅ **Boolean Expressions**: Lazy evaluation with Expression-based comparisons
+- ✅ **Selector Interface**: `rc.data` accessor with Field Expressions (Phase 7B)
 
 ---
 
