@@ -1365,9 +1365,242 @@ rc[mask] = 1.0  # Assign signal based on Expression mask
 4. ✓ Visitor updated to handle binary and unary operators
 5. ✓ All existing operator dataclasses updated with `eq=False`
 6. ✓ Full test suite passes (100/100)
-7. **TODO**: Create showcase demonstrating Boolean Expressions
-8. **TODO**: Implement cs_quantile operator (Phase 7A completion)
-9. **TODO**: Implement rc.data accessor (DataAccessor)
-10. **TODO**: Implement full F2 Selector Interface
+7. ✓ Showcase created demonstrating Boolean Expressions
+8. ✓ Public `rc.evaluate()` API added
+9. **NEXT**: Implement rc.data accessor (DataAccessor) - Phase 7B
+
+---
+
+## Phase 7B: DataAccessor (Selector Interface)
+
+### Experiment 15: DataAccessor Pattern Validation
+
+**Date**: 2025-01-21  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated that DataAccessor returning Field Expressions enables Expression-based selector workflows. All comparisons remain lazy until explicit evaluation, ensuring universe masking through Visitor pattern.
+
+#### Key Discovery: Why DataAccessor Returns Expressions
+
+**Problem**: Initial design had two accessors (`rc.data` and `rc.axis`):
+- `rc.data` for raw data access
+- `rc.axis` for categorical selection with special `['label']` syntax
+
+**Discovery**: This creates unnecessary complexity and duplication:
+- What distinguishes "data" from "axis"? (Arbitrary)
+- Two ways to do the same thing (violates "one obvious way")
+- `rc.axis.size['small']` is just syntactic sugar for `rc.data['size'] == 'small'`
+
+**Solution**: **Single accessor pattern** (`rc.data` only):
+- `rc.data['size']` → returns `Field('size')` Expression
+- `rc.data['size'] == 'small'` → returns `Equals` Expression
+- Explicit comparison (`== 'small'`) is clearer than implicit selection (`['small']`)
+- Leverages Phase 7A Boolean Expression infrastructure perfectly
+
+**Impact**: 
+- **Simplicity**: One accessor, not two
+- **Pythonic**: Explicit > implicit
+- **Consistent**: Everything is "data", no arbitrary "axis" concept
+- **Maintainable**: Less code, fewer concepts to understand
+
+#### Architecture Pattern
+
+**DataAccessor Design**:
+
+```python
+class DataAccessor:
+    """Returns Field Expressions for lazy evaluation."""
+    
+    def __getitem__(self, field_name: str) -> Field:
+        """Return Field Expression (not raw data!)"""
+        return Field(field_name)
+    
+    def __getattr__(self, name: str):
+        """Prevent attribute access - item access only."""
+        raise AttributeError(
+            f"Use rc.data['{name}'] instead of rc.data.{name}"
+        )
+```
+
+**Usage Pattern**:
+
+```python
+# Returns Field('size') Expression
+size_field = rc.data['size']
+
+# Returns Equals Expression (lazy)
+mask = rc.data['size'] == 'small'
+
+# Returns And Expression (lazy)
+complex_mask = (rc.data['size'] == 'small') & (rc.data['momentum'] == 'high')
+
+# Evaluate with universe masking
+result = rc.evaluate(mask)
+```
+
+#### Why Field Expressions, Not Raw Data?
+
+**Design Decision**: `rc.data['field']` returns `Field('field')`, not `rc.db['field']` (raw DataArray)
+
+**Rationale**:
+
+1. **Lazy Evaluation**
+   - No premature data loading
+   - Can compose expressions before evaluation
+   - Enables optimization opportunities
+
+2. **Universe Safety**
+   - All Expressions go through Visitor
+   - Universe masking guaranteed at evaluation time
+   - No way to bypass masking accidentally
+
+3. **Composability**
+   - Can chain with operators: `ts_mean(rc.data['returns'], 10)`
+   - Can store as recipes: `momentum = rc.data['returns'] > rc.data['sma']`
+   - Expressions are first-class objects
+
+4. **Consistency**
+   - All Expressions follow same evaluation path
+   - No special-case handling for "accessor-created" vs "manually-created" Fields
+   - Single `evaluate()` API for everything
+
+5. **Traceability**
+   - Visitor caches intermediate results with step indices
+   - Can trace PnL at any comparison step
+   - Debugging is transparent
+
+**Anti-Pattern (What We Avoided)**:
+
+```python
+# ❌ BAD: Returning raw data
+class DataAccessor:
+    def __getitem__(self, field_name):
+        return self._rc.db[field_name]  # Raw DataArray
+
+# Problem: Immediate evaluation, no universe masking guarantee
+mask = rc.data['size'] == 'small'  # Already a boolean DataArray
+# Universe can't be applied retroactively
+```
+
+#### Test Results
+
+**Experiment 15 Validated**:
+
+1. ✓ Basic access returns Field Expression
+2. ✓ Comparison creates Boolean Expression (lazy, not immediate)
+3. ✓ Complex logical chains remain as Expression trees
+4. ✓ Evaluator handles accessor-created Expressions correctly
+5. ✓ Universe masking applied correctly (4 masked positions → NaN)
+6. ✓ Type validation (non-string raises TypeError)
+7. ✓ Attribute access prevented (raises AttributeError)
+
+**Performance**: <1ms overhead for accessor (negligible)
+
+#### Usage Patterns Validated
+
+**1. Basic Selection**:
+```python
+small_mask = rc.data['size'] == 'small'
+result = rc.evaluate(small_mask)
+```
+
+**2. Multi-Dimensional Selection** (Fama-French style):
+```python
+selection = (
+    (rc.data['size'] == 'small') & 
+    (rc.data['value'] == 'high')
+)
+result = rc.evaluate(selection)
+```
+
+**3. Numeric Filtering**:
+```python
+penny_stocks = rc.data['price'] < 5.0
+illiquid = rc.data['volume'] < 100000
+low_quality = penny_stocks | illiquid
+result = rc.evaluate(low_quality)
+```
+
+**4. Negation**:
+```python
+not_small = ~(rc.data['size'] == 'small')
+result = rc.evaluate(not_small)
+```
+
+#### Integration with Phase 7A
+
+**Synergy**: Phase 7B (DataAccessor) perfectly leverages Phase 7A (Boolean Expressions)
+
+- Phase 7A provided: `__eq__`, `__and__`, `__or__` overloading on Expression base class
+- Phase 7B provides: Convenient accessor that returns those Expressions
+- Together: Natural, Pythonic syntax with universe safety
+
+**Example**:
+```python
+# Phase 7B: Accessor returns Field
+field = rc.data['size']  # Field('size')
+
+# Phase 7A: Comparison creates Expression
+mask = field == 'small'  # Equals(Field('size'), 'small')
+
+# Phase 7A: Logical operators chain
+complex = mask & (rc.data['momentum'] == 'high')  # And(Equals(...), Equals(...))
+
+# Visitor evaluates with universe masking
+result = rc.evaluate(complex)
+```
+
+#### Document Updates Required
+
+**Remove `rc.axis` from all documentation**:
+
+1. **PRD**: Replace `rc.axis.size['small']` with `rc.data['size'] == 'small'`
+2. **Architecture**: Remove AxisAccessor/AxisSelector sections
+3. **Implementation**: Update Interface B examples
+
+**Why remove `rc.axis`?**
+
+- **Simplicity wins**: One accessor is cleaner than two
+- **No semantic value**: "axis" vs "data" is arbitrary distinction
+- **Leverages existing infrastructure**: Phase 7A already enables `==` comparisons
+- **Pythonic principle**: Explicit (`== 'small'`) > implicit (`['small']`)
+
+#### Lessons Learned
+
+1. **Simplicity Over Cleverness**
+   - Initial design had clever `rc.axis` sugar → unnecessary
+   - Simple explicit comparison is clearer
+   - "One obvious way" is better than "two ways"
+
+2. **Accessor Pattern is Lightweight**
+   - Just return Field('field_name')
+   - All heavy lifting already done by Phase 7A
+   - Minimal code, maximum value
+
+3. **Item Access Only**
+   - Prevent `rc.data.field` (attribute access)
+   - Force `rc.data['field']` (item access)
+   - Single pattern reduces confusion
+
+4. **Expression-First Design**
+   - Always return Expressions, never raw data
+   - Ensures universe safety
+   - Enables composition and traceability
+
+5. **Document-First Reveals Issues**
+   - Writing PRD revealed `rc.axis` complexity
+   - User feedback identified duplication
+   - Critical evaluation prevented unnecessary code
+
+#### Next Steps
+
+1. ✓ Experiment validated DataAccessor pattern
+2. **TODO**: Write TDD tests for DataAccessor
+3. **TODO**: Implement DataAccessor class in utils/accessor.py
+4. **TODO**: Add `data` property to AlphaCanvas facade
+5. **TODO**: Create showcase demonstrating practical usage
+6. **TODO**: Update PRD to remove all `rc.axis` references
+7. **TODO**: Update architecture.md (DataAccessor only)
+8. **TODO**: Update implementation.md with correct patterns
 
 ---
