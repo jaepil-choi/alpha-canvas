@@ -147,6 +147,7 @@ class EvaluateVisitor:
         - Single child: TsMean, Rank, Not (has 'child' attribute)
         - Binary: And, Or (has 'left' and 'right' attributes)
         - Comparison: Equals, GreaterThan (has 'left' and 'right', right may be literal)
+        - CsQuantile: Special case with optional group_by parameter
         
         The double masking strategy (Field input + Operator output) creates
         a trust chain where operators trust their input is masked and ensure
@@ -170,6 +171,32 @@ class EvaluateVisitor:
             >>> result = mask.accept(visitor)
         """
         from alpha_canvas.core.expression import Expression
+        from alpha_canvas.ops.classification import CsQuantile
+        
+        # Special handling for CsQuantile (needs group_by lookup)
+        if isinstance(node, CsQuantile):
+            # 1. Evaluate child
+            child_result = node.child.accept(self)
+            
+            # 2. Look up group_by field if specified
+            group_labels = None
+            if node.group_by is not None:
+                if node.group_by not in self._data:
+                    raise ValueError(
+                        f"group_by field '{node.group_by}' not found in dataset"
+                    )
+                group_labels = self._data[node.group_by]
+            
+            # 3. Delegate to compute()
+            result = node.compute(child_result, group_labels)
+            
+            # 4. Apply universe masking
+            if self._universe_mask is not None:
+                result = result.where(self._universe_mask, np.nan)
+            
+            # 5. Cache
+            self._cache_result("CsQuantile", result)
+            return result
         
         # 1. Traversal: evaluate child/children expressions
         if hasattr(node, 'child'):

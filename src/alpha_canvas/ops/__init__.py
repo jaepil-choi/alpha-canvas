@@ -11,11 +11,13 @@ This module contains all operator implementations organized by category:
 from .timeseries import TsMean, TsAny
 from .crosssection import Rank
 from .logical import Equals, NotEquals, GreaterThan, LessThan, GreaterOrEqual, LessOrEqual, And, Or, Not
+from .classification import CsQuantile
 
 __all__ = [
     'TsMean', 'TsAny', 'Rank',
     'Equals', 'NotEquals', 'GreaterThan', 'LessThan', 'GreaterOrEqual', 'LessOrEqual',
-    'And', 'Or', 'Not'
+    'And', 'Or', 'Not',
+    'CsQuantile'
 ]
 
 
