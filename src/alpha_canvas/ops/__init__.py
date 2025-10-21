@@ -5,6 +5,7 @@ This module contains all operator implementations organized by category:
 - crosssection: Cross-sectional operators (Panel-specific)
 - logical: Boolean Expression operators (comparisons and logical operations)
 - classification: Classification operators for creating axes (cs_quantile, cs_cut)
+- constants: Constant Expression for blank canvas creation
 - transform: Transformation operators (group_neutralize, etc.)
 """
 
@@ -12,12 +13,14 @@ from .timeseries import TsMean, TsAny
 from .crosssection import Rank
 from .logical import Equals, NotEquals, GreaterThan, LessThan, GreaterOrEqual, LessOrEqual, And, Or, Not
 from .classification import CsQuantile
+from .constants import Constant
 
 __all__ = [
     'TsMean', 'TsAny', 'Rank',
     'Equals', 'NotEquals', 'GreaterThan', 'LessThan', 'GreaterOrEqual', 'LessOrEqual',
     'And', 'Or', 'Not',
-    'CsQuantile'
+    'CsQuantile',
+    'Constant'
 ]
 
 
