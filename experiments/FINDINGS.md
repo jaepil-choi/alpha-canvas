@@ -1595,12 +1595,149 @@ result = rc.evaluate(complex)
 #### Next Steps
 
 1. ✓ Experiment validated DataAccessor pattern
-2. **TODO**: Write TDD tests for DataAccessor
-3. **TODO**: Implement DataAccessor class in utils/accessor.py
-4. **TODO**: Add `data` property to AlphaCanvas facade
-5. **TODO**: Create showcase demonstrating practical usage
-6. **TODO**: Update PRD to remove all `rc.axis` references
-7. **TODO**: Update architecture.md (DataAccessor only)
-8. **TODO**: Update implementation.md with correct patterns
+2. ✓ TDD tests for DataAccessor (tests/test_utils/test_accessor.py)
+3. ✓ Implement DataAccessor class in utils/accessor.py
+4. ✓ Add `data` property to AlphaCanvas facade
+5. ✓ Create showcase demonstrating practical usage
+6. ✓ Update PRD to remove all `rc.axis` references
+7. ✓ Update architecture.md (DataAccessor only)
+8. ✓ Update implementation.md with correct patterns
+
+---
+
+## Phase 13: Cross-Sectional Quantile Bucketing (cs_quantile)
+
+### Experiment 16: xarray Groupby Shape Preservation
+
+**Date**: 2024-10-21  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated that xarray's `.groupby().map()` pattern preserves `(T, N)` shape when applying `pd.qcut` for quantile bucketing. Both independent and dependent sort patterns work correctly.
+
+#### Key Discoveries
+
+1. **Shape Preservation with .map()**
+   - **Pattern**: `data.groupby('time').map(lambda slice: pd.qcut(slice.flatten(), ...))`
+   - **Result**: Input `(T, N)` → Output `(T, N)` with categorical labels
+   - **Mechanism**: xarray automatically concatenates results back along grouped dimension
+   - **Critical**: Must flatten slice to 1D for `pd.qcut`, then reshape back
+
+2. **Categorical Label Output**
+   - `pd.qcut` with `labels` parameter returns object dtype (strings)
+   - Labels are preserved through xarray operations
+   - No numeric conversion - maintains semantic meaning ('small', 'big')
+   - Perfect for Fama-French style portfolio construction
+
+3. **Nested Groupby for Dependent Sort**
+   - **Pattern**: `data.groupby(groups).map(lambda g: g.groupby('time').map(qcut))`
+   - **Result**: Different quantile cutoffs for each group (as expected)
+   - **Verification**: Independent and dependent sorts produce different labels (17% of positions differ)
+   - **Performance**: 4.26x slower than independent sort (acceptable for batch processing)
+
+4. **NaN Handling**
+   - `pd.qcut` with `duplicates='drop'` handles NaN values gracefully
+   - NaN positions in input remain NaN in output
+   - Edge case: All same values → returns all NaN (gracefully handled)
+   - Edge case: All NaN → returns all NaN (gracefully handled)
+
+5. **Performance Characteristics**
+   - Independent sort: 27ms for (10×6) data
+   - Dependent sort: 117ms for (10×6) data (4.26x overhead)
+   - Performance acceptable for typical factor research workflows
+   - Overhead comes from nested groupby operations
+
+#### Critical Implementation Details
+
+**Flatten-Reshape Pattern:**
+```python
+def qcut_at_timestep(data_slice):
+    values_1d = data_slice.values.flatten()  # pd.qcut needs 1D
+    result = pd.qcut(values_1d, q=bins, labels=labels, duplicates='drop')
+    result_array = np.array(result).reshape(data_slice.shape)  # Reshape back
+    return xr.DataArray(result_array, dims=data_slice.dims, coords=data_slice.coords)
+```
+
+**Nested Groupby for Dependent Sort:**
+```python
+def apply_qcut_within_group(group_data):
+    return group_data.groupby('time').map(qcut_function)
+
+result = data.groupby(size_labels).map(apply_qcut_within_group)
+```
+
+#### Lessons Learned
+
+1. **xarray .map() vs .apply()**
+   - Both work for shape preservation
+   - `.map()` is cleaner for xarray-to-xarray transformations
+   - Automatic concatenation is the key feature
+
+2. **pd.qcut Requires 1D Input**
+   - Must explicitly flatten before calling `pd.qcut`
+   - Must explicitly reshape after to match original dimensions
+   - This pattern is consistent and reliable
+
+3. **duplicates='drop' Is Essential**
+   - Handles edge cases (all same values, all NaN)
+   - Returns NaN for problematic bins instead of raising error
+   - Graceful degradation for real-world data
+
+4. **Independent vs Dependent Sort Verification**
+   - Critical to verify they produce different cutoffs
+   - This confirms correct Fama-French implementation
+   - Must test on realistic data, not just toy examples
+
+5. **Performance Is Acceptable**
+   - 4x overhead for dependent sort is reasonable
+   - Factor research is typically batch processing (not real-time)
+   - Can optimize later if needed (e.g., with flox library)
+
+#### Architectural Implications
+
+1. **Operator Responsibility Pattern Still Applies**
+   - Operator owns `compute()` with flatten-reshape-qcut logic
+   - Visitor handles traversal and group lookup only
+   - Clear separation of concerns
+
+2. **Special Handling for group_by Parameter**
+   - Visitor must look up `group_by` field from dataset
+   - Pass group labels to `compute()` as optional parameter
+   - This is a special case, but fits existing patterns
+
+3. **Universe Masking Integration**
+   - Universe masking applies AFTER quantile bucketing
+   - NaN positions in universe become NaN in output
+   - No special handling needed - existing pattern works
+
+4. **String Labels Are First-Class**
+   - object dtype for categorical labels is correct
+   - Enables comparison operations: `rc.data['size'] == 'small'`
+   - Integrates perfectly with Boolean Expression infrastructure
+
+#### Test Strategy
+
+**Unit Tests:**
+- Test `compute()` directly with synthetic data
+- Verify shape preservation
+- Verify categorical output
+- Verify NaN handling
+- Verify edge cases (all same, all NaN)
+- Compare independent vs dependent cutoffs
+
+**Integration Tests:**
+- Test with Visitor and Expression tree
+- Verify group_by field lookup
+- Verify universe masking application
+- Verify caching works correctly
+- Verify error handling (group_by field not found)
+
+#### Next Steps
+
+1. ✅ Experiment validated shape preservation pattern
+2. **TODO**: Write TDD tests in `tests/test_ops/test_classification.py`
+3. **TODO**: Implement `CsQuantile` class in `src/alpha_canvas/ops/classification.py`
+4. **TODO**: Update Visitor to handle `CsQuantile` special case
+5. **TODO**: Create showcase demonstrating Fama-French portfolio construction
+6. **TODO**: Update documentation if patterns changed
 
 ---
