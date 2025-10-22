@@ -286,7 +286,85 @@ rc.add_data('momentum', cs_quantile(rc.data['returns'], bins=5, labels=['q1','q2
                                       mask=high_liquidity_mask))
 ```
 
-## 1.8. 유니버스 정의 (Universe Definition)
+## 1.8. 포트폴리오 구성 (Portfolio Construction - F5)
+
+### 개념
+
+시그널(Signal) 생성 후, 실제 거래 가능한 포트폴리오 가중치(Portfolio Weights)로 변환하는 단계입니다. 임의의 시그널 값을 제약 조건(gross/net exposure, long-only 등)을 만족하는 정규화된 가중치로 스케일링합니다.
+
+### 요구사항
+
+* **전략 패턴(Strategy Pattern)**: 다양한 스케일링 전략을 플러그인 방식으로 지원
+* **명시적 파라미터**: 스케일러는 항상 명시적으로 전달 (상태 저장 없음)
+* **크로스-섹션 독립**: 각 시점(T)마다 독립적으로 스케일링
+* **유니버스 준수**: 스케일링 후에도 유니버스 마스킹 유지
+
+### 통합 프레임워크: Gross/Net Exposure
+
+가장 범용적인 스케일링 방식은 **총 노출(Gross Exposure, G)**과 **순 노출(Net Exposure, N)**로 제약을 정의하는 것입니다:
+
+$$L_{\text{target}} = \frac{G + N}{2}, \quad S_{\text{target}} = \frac{G - N}{2}$$
+
+여기서:
+- $G = \sum |w_i|$ (총 노출: 롱 + 숏의 절대값 합)
+- $N = \sum w_i$ (순 노출: 롱 - 숏)
+- $L$ = 롱 포지션 합
+- $S$ = 숏 포지션 합 (음수 값)
+
+### 사용 시나리오
+
+```python
+from alpha_canvas.portfolio import DollarNeutralScaler, GrossNetScaler, LongOnlyScaler
+
+# 1. 시그널 생성 (임의의 값)
+signal_expr = ts_mean(Field('returns'), 5)
+signal_data = rc.evaluate(signal_expr)  # (T, N) DataArray
+
+# 2. 달러 중립 포트폴리오 (Long=1.0, Short=-1.0)
+scaler = DollarNeutralScaler()
+weights = scaler.scale(signal_data)
+# sum(weights[weights > 0]) = 1.0
+# sum(weights[weights < 0]) = -1.0
+
+# 3. 순 롱 바이어스 포트폴리오 (Long=1.1, Short=-0.9)
+scaler = GrossNetScaler(target_gross=2.0, target_net=0.2)
+weights = scaler.scale(signal_data)
+
+# 4. 롱 온리 포트폴리오 (sum=1.0)
+scaler = LongOnlyScaler(target_long=1.0)
+weights = scaler.scale(signal_data)
+
+# 5. 크립토 선물 (Gross=100%, Net=0%)
+scaler = GrossNetScaler(target_gross=1.0, target_net=0.0)
+weights = scaler.scale(signal_data)
+# sum(abs(weights)) = 1.0 (롱 50% + 숏 50%)
+```
+
+### 파사드 통합 (편의 메서드)
+
+```python
+# AlphaCanvas에서 직접 스케일링 (Expression 자동 평가)
+signal_expr = ts_mean(Field('returns'), 5)
+scaler = DollarNeutralScaler()
+
+# 편의 메서드: evaluate + scale 한 번에
+weights = rc.scale_weights(signal_expr, scaler)
+```
+
+### 설계 근거
+
+* **Stateless 설계**: 스케일러는 상태를 저장하지 않음 (재사용 가능)
+* **명시적 우선**: 어떤 스케일러를 사용하는지 항상 명확함
+* **연구 친화적**: 동일 시그널에 여러 스케일러를 쉽게 비교 가능
+* **확장 가능**: 새로운 스케일링 전략 추가 용이 (Strategy Pattern)
+
+### 미래 확장
+
+* **리스크 기반 스케일링**: `RiskTargetScaler(target_vol, cov_matrix)`
+* **최적화 기반**: `OptimizationScaler(constraints)` with cvxpy
+* **포지션 제한**: `max_weight_per_asset`, `turnover_limit` 등
+
+## 1.9. 유니버스 정의 (Universe Definition)
 
 ### 개념
 

@@ -25,6 +25,10 @@ alpha-canvas/
 │       │   ├── classification.py # cs_quantile, cs_cut (분류기/축 생성)
 │       │   ├── transform.py    # group_neutralize, etc.
 │       │   └── tensor.py       # 미래 확장용 (MVP에서는 비어있음)
+│       ├── portfolio/          # 포트폴리오 구성
+│       │   ├── __init__.py
+│       │   ├── base.py         # WeightScaler 추상 베이스 클래스
+│       │   └── strategies.py   # GrossNetScaler, DollarNeutralScaler, LongOnlyScaler
 │       ├── analysis/
 │       │   ├── pnl.py          # PnLTracer
 │       │   └── metrics.py      # 성과 지표 계산
@@ -1238,6 +1242,355 @@ for step_idx in sorted(rc._evaluator._cache.keys()):
 - ✅ Traceability (separate base/final caching)
 - ✅ Tests: storage, evaluation, overlapping masks, caching
 - ✅ Showcase: Fama-French 2×3 factor construction
+
+---
+
+## 3.4.3. Portfolio Weight Scaling 📋 **PLANNED**
+
+### 개요
+
+**Portfolio Weight Scaling**은 임의의 시그널 값을 제약 조건을 만족하는 포트폴리오 가중치로 변환하는 모듈입니다. Strategy Pattern을 사용하여 다양한 스케일링 전략을 플러그인 방식으로 지원합니다.
+
+**핵심 설계 원칙**:
+- **Stateless**: 스케일러는 상태를 저장하지 않음 (항상 명시적 파라미터로 전달)
+- **Strategy Pattern**: 다양한 스케일링 전략을 쉽게 교체 가능
+- **Cross-Sectional**: 각 시점 독립적으로 처리 (`groupby('time').map()` 패턴)
+- **NaN-Aware**: 유니버스 마스킹 자동 보존
+
+### WeightScaler 베이스 클래스
+
+```python
+from abc import ABC, abstractmethod
+import xarray as xr
+
+
+class WeightScaler(ABC):
+    """Abstract base class for weight scaling strategies.
+    
+    Converts arbitrary signal values to portfolio weights by applying
+    constraints cross-sectionally (independently for each time period).
+    
+    Philosophy:
+    - Operates on (T, N) signal DataArray
+    - Returns (T, N) weight DataArray
+    - Each time slice processed independently
+    - NaN-aware (respects universe masking)
+    - Strategy pattern: subclasses define scaling logic
+    """
+    
+    @abstractmethod
+    def scale(self, signal: xr.DataArray) -> xr.DataArray:
+        """Scale signal to weights.
+        
+        Args:
+            signal: (T, N) DataArray with arbitrary signal values
+        
+        Returns:
+            (T, N) DataArray with portfolio weights
+        
+        Note:
+            - Must handle NaN values (preserve them in output)
+            - Must process each time slice independently
+            - Should validate inputs (not all NaN, etc.)
+        """
+        pass
+    
+    def _validate_signal(self, signal: xr.DataArray):
+        """Validate signal before scaling."""
+        if signal.dims != ('time', 'asset'):
+            raise ValueError(
+                f"Signal must have dims ('time', 'asset'), got {signal.dims}"
+            )
+        
+        # Check if any time slice has non-NaN values
+        non_nan_counts = (~signal.isnull()).sum(dim='asset')
+        if (non_nan_counts == 0).all():
+            raise ValueError(
+                "All signal values are NaN across all time periods"
+            )
+```
+
+### GrossNetScaler (통합 프레임워크)
+
+```python
+class GrossNetScaler(WeightScaler):
+    """Unified weight scaler based on gross and net exposure targets.
+    
+    Uses the unified framework:
+        L_target = (G + N) / 2
+        S_target = (G - N) / 2
+    
+    Where:
+        G = target_gross_exposure = sum(abs(weights))
+        N = target_net_exposure = sum(weights)
+        L = sum of positive weights
+        S = sum of negative weights (negative value)
+    
+    Args:
+        target_gross: Target gross exposure (default: 2.0 for 200% gross)
+        target_net: Target net exposure (default: 0.0 for dollar-neutral)
+    
+    Example:
+        >>> # Dollar neutral: L=1.0, S=-1.0
+        >>> scaler = GrossNetScaler(target_gross=2.0, target_net=0.0)
+        >>> 
+        >>> # Net long 10%: L=1.1, S=-0.9
+        >>> scaler = GrossNetScaler(target_gross=2.0, target_net=0.2)
+        >>> 
+        >>> # Crypto futures: L=0.5, S=-0.5
+        >>> scaler = GrossNetScaler(target_gross=1.0, target_net=0.0)
+    """
+    
+    def __init__(self, target_gross: float = 2.0, target_net: float = 0.0):
+        self.target_gross = target_gross
+        self.target_net = target_net
+        
+        # Validate constraints
+        if target_gross < 0:
+            raise ValueError("target_gross must be non-negative")
+        if abs(target_net) > target_gross:
+            raise ValueError(
+                "Absolute net exposure cannot exceed gross exposure"
+            )
+        
+        # Calculate target long and short books
+        self.L_target = (target_gross + target_net) / 2.0
+        self.S_target = (target_net - target_gross) / 2.0  # Negative value
+    
+    def scale(self, signal: xr.DataArray) -> xr.DataArray:
+        """Scale signal using gross/net exposure constraints."""
+        self._validate_signal(signal)
+        
+        # Apply scaling cross-sectionally using groupby
+        return signal.groupby('time').map(self._scale_single_period)
+    
+    def _scale_single_period(self, signal_slice: xr.DataArray) -> xr.DataArray:
+        """Scale a single time period (cross-section).
+        
+        Note:
+            Uses the same pattern as cs_quantile for cross-sectional
+            independence and shape preservation.
+        """
+        # Separate positive and negative signals
+        s_pos = signal_slice.where(signal_slice > 0, 0.0)
+        s_neg = signal_slice.where(signal_slice < 0, 0.0)
+        
+        # Calculate sums (NaN-safe)
+        sum_pos = s_pos.sum(skipna=True)
+        sum_neg_abs = np.abs(s_neg.sum(skipna=True))
+        
+        # Initialize weights with zeros
+        weights = xr.zeros_like(signal_slice)
+        
+        # Scale positive side
+        if sum_pos > 0:
+            weights = weights + (s_pos / sum_pos) * self.L_target
+        
+        # Scale negative side
+        if sum_neg_abs > 0:
+            weights = weights + (s_neg / sum_neg_abs) * self.S_target
+        
+        # Preserve NaN where signal was NaN (universe masking)
+        weights = weights.where(~signal_slice.isnull())
+        
+        return weights
+```
+
+### 편의 Scaler 클래스들
+
+```python
+class DollarNeutralScaler(GrossNetScaler):
+    """Dollar neutral: sum(long) = 1.0, sum(short) = -1.0.
+    
+    Convenience wrapper for GrossNetScaler(2.0, 0.0).
+    
+    This is the most common scaler for market-neutral strategies.
+    """
+    def __init__(self):
+        super().__init__(target_gross=2.0, target_net=0.0)
+
+
+class LongOnlyScaler(WeightScaler):
+    """Long-only portfolio: sum(weights) = target_long.
+    
+    Ignores negative signals, normalizes positive signals to sum to target.
+    
+    Args:
+        target_long: Target sum of weights (default: 1.0)
+    
+    Example:
+        >>> scaler = LongOnlyScaler(target_long=1.0)
+        >>> # All negative signals become 0, positives sum to 1.0
+    """
+    
+    def __init__(self, target_long: float = 1.0):
+        self.target_long = target_long
+    
+    def scale(self, signal: xr.DataArray) -> xr.DataArray:
+        self._validate_signal(signal)
+        return signal.groupby('time').map(self._scale_single_period)
+    
+    def _scale_single_period(self, signal_slice: xr.DataArray) -> xr.DataArray:
+        # Only keep positive values
+        s_pos = signal_slice.where(signal_slice > 0, 0.0)
+        sum_pos = s_pos.sum(skipna=True)
+        
+        if sum_pos > 0:
+            weights = (s_pos / sum_pos) * self.target_long
+        else:
+            weights = xr.zeros_like(signal_slice)
+        
+        # Preserve NaN
+        return weights.where(~signal_slice.isnull())
+```
+
+### Facade 통합
+
+```python
+# In AlphaCanvas class (src/alpha_canvas/core/facade.py)
+
+def scale_weights(
+    self, 
+    signal: Union[Expression, xr.DataArray], 
+    scaler: 'WeightScaler'
+) -> xr.DataArray:
+    """Scale signal to portfolio weights.
+    
+    Args:
+        signal: Expression or DataArray with signal values
+        scaler: WeightScaler strategy instance (REQUIRED)
+    
+    Returns:
+        (T, N) DataArray with portfolio weights
+    
+    Note:
+        Scaler is a required parameter - no default.
+        This is intentional for explicit, research-friendly API.
+    
+    Example:
+        >>> from alpha_canvas.portfolio import DollarNeutralScaler
+        >>> 
+        >>> signal = ts_mean(Field('returns'), 5)
+        >>> scaler = DollarNeutralScaler()
+        >>> weights = rc.scale_weights(signal, scaler)
+        >>> 
+        >>> # Compare multiple scalers
+        >>> w1 = rc.scale_weights(signal, DollarNeutralScaler())
+        >>> w2 = rc.scale_weights(signal, LongOnlyScaler(1.0))
+    """
+    # Evaluate if Expression
+    if hasattr(signal, 'accept'):
+        signal_data = self.evaluate(signal)
+    else:
+        signal_data = signal
+    
+    # Apply scaling strategy
+    weights = scaler.scale(signal_data)
+    
+    return weights
+```
+
+### 사용 패턴 및 예시
+
+**패턴 1: 직접 사용 (가장 명시적)**
+
+```python
+from alpha_canvas.portfolio import DollarNeutralScaler
+
+# 1. Signal 생성
+signal_expr = ts_mean(Field('returns'), 5)
+signal_data = rc.evaluate(signal_expr)
+
+# 2. Scaler 생성 및 적용
+scaler = DollarNeutralScaler()
+weights = scaler.scale(signal_data)
+
+# 검증
+assert abs(weights[weights > 0].sum() - 1.0) < 1e-6  # Long = 1.0
+assert abs(weights[weights < 0].sum() + 1.0) < 1e-6  # Short = -1.0
+```
+
+**패턴 2: Facade 편의 메서드**
+
+```python
+from alpha_canvas.portfolio import GrossNetScaler
+
+signal_expr = ts_mean(Field('returns'), 5)
+scaler = GrossNetScaler(target_gross=2.0, target_net=0.2)
+
+# evaluate + scale 한 번에
+weights = rc.scale_weights(signal_expr, scaler)
+```
+
+**패턴 3: 여러 스케일러 비교 (연구용)**
+
+```python
+from alpha_canvas.portfolio import (
+    DollarNeutralScaler,
+    GrossNetScaler,
+    LongOnlyScaler
+)
+
+# 동일 시그널에 여러 스케일링 전략 적용
+signal = rc.evaluate(my_alpha_expr)
+
+strategies = {
+    'dollar_neutral': DollarNeutralScaler(),
+    'net_long_10pct': GrossNetScaler(2.0, 0.2),
+    'long_only': LongOnlyScaler(1.0),
+    'crypto_futures': GrossNetScaler(1.0, 0.0)
+}
+
+weights_dict = {
+    name: scaler.scale(signal)
+    for name, scaler in strategies.items()
+}
+
+# 각 전략 비교
+for name, weights in weights_dict.items():
+    print(f"{name}:")
+    print(f"  Gross: {abs(weights).sum()}")
+    print(f"  Net: {weights.sum()}")
+```
+
+### Module Structure
+
+```
+src/alpha_canvas/portfolio/
+├── __init__.py              # Export all scalers
+├── base.py                  # WeightScaler abstract base class
+└── strategies.py            # GrossNetScaler, DollarNeutralScaler, LongOnlyScaler
+```
+
+### 테스트 전략
+
+**1. 단위 테스트** (`tests/test_portfolio/test_strategies.py`):
+- `GrossNetScaler` 수학 검증 (L_target, S_target 계산)
+- 각 scaler의 constraint 충족 확인
+- NaN 보존 검증
+- Edge cases: all positive, all negative, zeros
+
+**2. 통합 테스트**:
+- AlphaCanvas.scale_weights() 통합
+- Expression → evaluation → scaling 전체 파이프라인
+- Universe masking 보존 검증
+
+**3. 성능 테스트**:
+- 크로스-섹션 독립성 검증
+- Large dataset (T=1000, N=3000) 벤치마크
+
+### Implementation Checklist
+
+- [ ] `WeightScaler` abstract base class
+- [ ] `GrossNetScaler` with unified framework
+- [ ] `DollarNeutralScaler` convenience wrapper
+- [ ] `LongOnlyScaler` implementation
+- [ ] `AlphaCanvas.scale_weights()` facade method
+- [ ] Unit tests for each scaler
+- [ ] Integration tests with facade
+- [ ] Experiment: weight scaling validation
+- [ ] Showcase: Fama-French signal → weights
+- [ ] Documentation in all three docs
 
 ---
 

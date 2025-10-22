@@ -34,11 +34,18 @@ graph TB
         Parquet[(Parquet Files)]
     end
     
+    subgraph "Portfolio Layer"
+        Scalers[Weight Scalers]
+        Strategies[Scaling Strategies]
+    end
+    
     User -->|initialize| RC
     User -->|add_data| RC
+    User -->|scale_weights| RC
     RC -->|stores| DB
     RC -->|registers| Rules
     RC -->|owns| Visitor
+    RC -->|delegates| Scalers
     
     Visitor -->|applies| UnivMask
     Visitor -->|caches| Cache
@@ -51,6 +58,7 @@ graph TB
     DataLoader -->|reads| Config
     DataLoader -->|queries| Parquet
     
+    Scalers -->|uses| Strategies
     Operators -->|compute| Operators
 ```
 
@@ -464,6 +472,151 @@ result = rc.evaluate(penny_stocks)
 - [ ] `cs_quantile` 연산자 (group_by, mask 파라미터)
 - [ ] xarray.groupby().apply() 통합
 - [ ] 셀렉터 기반 포트폴리오 구성 로직
+
+---
+
+### 📋 **F5 (포트폴리오 구성) - PLANNED**
+
+**상태**: 설계 완료, 구현 대기
+
+#### 1. 아키텍처 개요
+
+**Strategy Pattern** 기반의 포트폴리오 가중치 스케일링 시스템입니다.
+
+```mermaid
+classDiagram
+    class WeightScaler {
+        <<abstract>>
+        +scale(signal: DataArray) DataArray
+        #_validate_signal(signal)
+    }
+    
+    class GrossNetScaler {
+        -target_gross: float
+        -target_net: float
+        -L_target: float
+        -S_target: float
+        +scale(signal: DataArray) DataArray
+        #_scale_single_period(signal_slice)
+    }
+    
+    class DollarNeutralScaler {
+        +scale(signal: DataArray) DataArray
+    }
+    
+    class LongOnlyScaler {
+        -target_long: float
+        +scale(signal: DataArray) DataArray
+        #_scale_single_period(signal_slice)
+    }
+    
+    class AlphaCanvas {
+        +scale_weights(signal, scaler) DataArray
+    }
+    
+    WeightScaler <|-- GrossNetScaler
+    WeightScaler <|-- LongOnlyScaler
+    GrossNetScaler <|-- DollarNeutralScaler
+    AlphaCanvas ..> WeightScaler : uses
+```
+
+#### 2. 설계 원칙
+
+**Stateless Design (Option 1)**:
+- 스케일러는 상태를 저장하지 않음
+- 항상 명시적으로 파라미터로 전달
+- 재사용 가능 (동일 인스턴스를 여러 시그널에 적용)
+
+**근거**:
+1. **Research-Friendly**: 동일 시그널에 여러 스케일러 쉽게 비교
+2. **Explicit over Implicit**: 어떤 스케일러를 사용하는지 항상 명확
+3. **No Hidden State**: AlphaCanvas가 스케일러 상태를 관리하지 않음
+4. **Sklearn-like**: `transformer.transform(X)` 패턴과 유사
+
+#### 3. 통합 프레임워크: GrossNetScaler
+
+**수학적 모델**:
+- 입력: `target_gross` ($G$), `target_net` ($N$)
+- 출력: 롱/숏 타겟 계산
+  $$L_{\text{target}} = \frac{G + N}{2}, \quad S_{\text{target}} = \frac{G - N}{2}$$
+
+**처리 흐름**:
+```
+Signal (T, N) with arbitrary values
+    ↓
+groupby('time').map()  # 각 시점 독립 처리
+    ↓
+Separate positive/negative signals
+    ↓
+Scale positive: w_pos = s_pos / sum(s_pos) * L_target
+Scale negative: w_neg = s_neg / sum(|s_neg|) * S_target
+    ↓
+Combine: weights = w_pos + w_neg
+    ↓
+Preserve NaN (universe masking)
+    ↓
+Weights (T, N) satisfying constraints
+```
+
+#### 4. Facade 통합
+
+```python
+class AlphaCanvas:
+    def scale_weights(
+        self, 
+        signal: Union[Expression, xr.DataArray],
+        scaler: WeightScaler
+    ) -> xr.DataArray:
+        """Scale signal to portfolio weights.
+        
+        Args:
+            signal: Expression or DataArray with signal values
+            scaler: WeightScaler strategy (REQUIRED - no default)
+        
+        Returns:
+            (T, N) DataArray with portfolio weights
+        
+        Note:
+            Scaler must be explicitly provided.
+            This is intentional for research-friendly, explicit API.
+        """
+        # Evaluate if Expression
+        if hasattr(signal, 'accept'):
+            signal_data = self.evaluate(signal)
+        else:
+            signal_data = signal
+        
+        # Apply scaling strategy (delegation)
+        weights = scaler.scale(signal_data)
+        
+        return weights
+```
+
+#### 5. 사용 패턴
+
+```python
+# Pattern 1: Direct scaler usage
+scaler = DollarNeutralScaler()
+signal_data = rc.evaluate(ts_mean(Field('returns'), 5))
+weights = scaler.scale(signal_data)
+
+# Pattern 2: Facade convenience method
+scaler = GrossNetScaler(target_gross=2.0, target_net=0.2)
+weights = rc.scale_weights(ts_mean(Field('returns'), 5), scaler)
+
+# Pattern 3: Compare multiple scalers
+signal = rc.evaluate(my_alpha_expr)
+w1 = DollarNeutralScaler().scale(signal)
+w2 = GrossNetScaler(2.0, 0.4).scale(signal)
+w3 = LongOnlyScaler(1.0).scale(signal)
+```
+
+#### 6. 미래 확장
+
+- `RiskTargetScaler(target_vol, cov_matrix)`: 리스크 기반
+- `OptimizationScaler(constraints)`: cvxpy 최적화
+- `SoftmaxScaler(temperature)`: 확률적 가중치
+- Position limits, turnover constraints 등
 
 ## 2.3. 설계 원칙 및 근거
 
