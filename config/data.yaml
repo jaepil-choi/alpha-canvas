@@ -13,7 +13,7 @@ adj_close:
       date, 
       security_id, 
       close_price * adjustment_factor as adj_close 
-    FROM read_parquet('data/pricevolume.parquet')
+    FROM read_parquet('data/fake/pricevolume.parquet')
     WHERE date >= :start_date 
       AND date <= :end_date
 
@@ -29,7 +29,7 @@ volume:
       date, 
       security_id, 
       volume 
-    FROM read_parquet('data/pricevolume.parquet')
+    FROM read_parquet('data/fake/pricevolume.parquet')
     WHERE date >= :start_date 
       AND date <= :end_date
 
@@ -65,16 +65,17 @@ subindustry:
 
 # Example: Daily returns
 returns:
+  db_type: parquet
   table: PRICEVOLUME
   index_col: date
-  security_col: securities
-  value_col: returns
+  security_col: security_id
+  value_col: return
   query: >
     SELECT 
-      TRD_DD as date, 
-      TICKER as securities, 
-      (CLOSE * ADJ_FACTOR / LAG(CLOSE * ADJ_FACTOR) OVER (PARTITION BY TICKER ORDER BY TRD_DD) - 1) as returns
-    FROM PRICEVOLUME
-    WHERE TRD_DD >= :start_date 
-      AND TRD_DD <= :end_date
+      date, 
+      security_id, 
+      return 
+    FROM read_parquet('data/fake/pricevolume.parquet')
+    WHERE date >= :start_date 
+      AND date <= :end_date
 

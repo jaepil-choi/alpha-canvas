@@ -118,26 +118,52 @@ def main():
     if len(unique_adj) == 1 and unique_adj[0] == 1.0:
         print("    [OK] All adjustment factors are 1.0")
     
-    # Step 7: Create data directory and save Parquet
-    print("\n[Step 7] Saving to Parquet...")
-    data_dir = Path('data')
-    data_dir.mkdir(exist_ok=True)
+    # Step 7: Calculate returns from price data
+    print("\n[Step 7] Calculating returns from close prices...")
+    df_sorted = df.sort_values(['security_id', 'date']).copy()
     
+    # Calculate percentage returns: (close[t] - close[t-1]) / close[t-1]
+    df_sorted['return'] = df_sorted.groupby('security_id')['close_price'].pct_change()
+    
+    print(f"  [OK] Returns calculated")
+    print(f"       Total rows: {len(df_sorted)}")
+    print(f"       NaN returns (first day per security): {df_sorted['return'].isna().sum()}")
+    print(f"       Expected NaN count: {len(securities)} (one per security)")
+    
+    # Show sample returns
+    print("\n  Sample returns (first 12 rows showing calculation):")
+    sample_cols = ['date', 'security_id', 'close_price', 'return']
+    print(df_sorted[sample_cols].head(12).to_string(index=False))
+    
+    # Statistics
+    print(f"\n  Return statistics:")
+    print(f"    Mean: {df_sorted['return'].mean():.6f}")
+    print(f"    Std: {df_sorted['return'].std():.6f}")
+    print(f"    Min: {df_sorted['return'].min():.6f}")
+    print(f"    Max: {df_sorted['return'].max():.6f}")
+    
+    # Step 8: Create data directory and save Parquet files
+    print("\n[Step 8] Saving to Parquet files...")
+    data_dir = Path('data/fake')
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save ALL data (price/volume AND returns) to one file
     output_path = data_dir / 'pricevolume.parquet'
-    df.to_parquet(output_path, index=False)
+    df_sorted.to_parquet(output_path, index=False)
+    print(f"  [OK] All data (price/volume/returns) saved: {output_path}")
     
-    print(f"  [OK] Parquet file saved: {output_path}")
+    # Step 9: Verify file
+    print("\n[Step 9] Verifying saved file...")
     
-    # Step 8: Verify file
-    print("\n[Step 8] Verifying saved file...")
+    # Verify saved file
     file_size = output_path.stat().st_size
     print(f"  File size: {file_size:,} bytes ({file_size / 1024:.2f} KB)")
-    
-    # Read back and verify
     df_verify = pd.read_parquet(output_path)
-    print(f"  Rows after read: {len(df_verify)}")
-    print(f"  Columns after read: {len(df_verify.columns)}")
-    print(f"  Match original: {df.equals(df_verify)}")
+    print(f"    Rows: {len(df_verify)}")
+    print(f"    Columns: {df_verify.columns.tolist()}")
+    print(f"    Has 'return' column: {'return' in df_verify.columns}")
+    print(f"    NaN returns: {df_verify['return'].isna().sum()} (expected: {len(securities)})")
+    print(f"    Return range: [{df_verify['return'].min():.6f}, {df_verify['return'].max():.6f}]")
     
     # Final summary
     print("\n" + "=" * 70)
@@ -145,14 +171,19 @@ def main():
     print("=" * 70)
     print("[SUCCESS] Mock Parquet data created successfully!")
     print()
-    print("File Details:")
+    print("Data File:")
     print(f"  Path: {output_path}")
-    print(f"  Rows: {len(df_verify)} (15 days × 6 securities)")
+    print(f"  Rows: {len(df_verify)} ({len(dates)} days × {len(securities)} securities)")
     print(f"  Columns: {', '.join(df_verify.columns)}")
     print(f"  Date range: {df_verify['date'].min()} to {df_verify['date'].max()}")
     print(f"  Securities: {', '.join(sorted(df_verify['security_id'].unique()))}")
     print()
-    print("Ready for DuckDB query experiments!")
+    print("Returns Data (in same file):")
+    print(f"  Return range: {df_verify['return'].min():.6f} to {df_verify['return'].max():.6f}")
+    print(f"  Mean return: {df_verify['return'].mean():.6f}")
+    print(f"  NaN count: {df_verify['return'].isna().sum()} (first day per security)")
+    print()
+    print("Ready for backtest experiments!")
     print("=" * 70)
 
 
