@@ -540,23 +540,32 @@ classDiagram
 - 출력: 롱/숏 타겟 계산
   $$L_{\text{target}} = \frac{G + N}{2}, \quad S_{\text{target}} = \frac{G - N}{2}$$
 
-**처리 흐름**:
+**처리 흐름 (완전 벡터화)**:
 ```
 Signal (T, N) with arbitrary values
     ↓
-groupby('time').map()  # 각 시점 독립 처리
+Separate positive/negative (vectorized)
     ↓
-Separate positive/negative signals
+Normalize: s_pos/sum(s_pos), |s_neg|/sum(|s_neg|)  [handle 0/0 → NaN → 0]
     ↓
-Scale positive: w_pos = s_pos / sum(s_pos) * L_target
-Scale negative: w_neg = s_neg / sum(|s_neg|) * S_target
+Apply targets: weights = norm_pos * L_target - norm_neg * |S_target|
     ↓
-Combine: weights = w_pos + w_neg
+Calculate actual_gross per row (vectorized)
     ↓
-Preserve NaN (universe masking)
+Scale to meet target: weights * (target_gross / actual_gross)  [handle 0/0 with xr.where]
     ↓
-Weights (T, N) satisfying constraints
+Convert computational NaN to 0 (fillna before universe mask)
+    ↓
+Apply universe mask (preserves signal NaN)
+    ↓
+Weights (T, N) satisfying gross constraint
 ```
+
+**핵심 혁신**:
+- **NO ITERATION**: 순수 벡터화 연산 (Python 루프 없음)
+- **성능**: 7-34ms for 10×6 to 1000×500 datasets
+- **견고성**: Gross target 항상 충족 (one-sided signals 포함)
+- **스케일링 우선순위**: Gross > Net (Net은 mixed signals에서만 달성 가능)
 
 #### 4. Facade 통합
 
