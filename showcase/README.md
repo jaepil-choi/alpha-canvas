@@ -21,6 +21,7 @@ poetry run python showcase/11_data_accessor.py
 poetry run python showcase/12_cs_quantile.py
 poetry run python showcase/13_signal_assignment.py
 poetry run python showcase/14_weight_scaling.py
+poetry run python showcase/15_weight_caching_pnl.py
 ```
 
 Or run all showcases in sequence:
@@ -187,6 +188,20 @@ poetry run python showcase/run_all.py
 
 **Key Features**: Strategy Pattern, GrossNetScaler vectorized algorithm, dollar-neutral portfolio, net-long bias, stateless design, explicit strategy selection, performance validated
 
+### 15. Weight Caching & PnL Tracing (`15_weight_caching_pnl.py`)
+- Dual-cache architecture (signals + weights) for PnL analysis
+- Step-by-step weight tracking at every evaluation step
+- Efficient scaler replacement without re-evaluation
+- `rc.evaluate(expr, scaler=...)` API for weight caching
+- `rc.get_weights(step)` convenience method for weight retrieval
+- Signal cache persistence, weight cache renewal
+- Preparing for future PnL tracing and attribution
+- Multi-step expression example (Field → TsMean → Rank)
+- Comparison of DollarNeutral vs. Net-Long strategies
+- Future API preview for step-by-step PnL decomposition
+
+**Key Features**: Dual-cache architecture, step-by-step weight caching, efficient scaler swapping, PnL tracing foundation, rc.get_weights() API, signal persistence, weight renewal
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:
@@ -200,10 +215,10 @@ All showcases should complete with `[SUCCESS]` verdicts, demonstrating that the 
 ## Foundation Test Results
 
 The complete MVP foundation has:
-- ✅ **154 tests passing** (100% success rate)
+- ✅ **165 tests passing** (100% success rate)
 - ✅ **18 experiments validated** (all SUCCESS)
-- ✅ **15 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment, **Weight Scaling**
-- ✅ **Production-ready** architecture (Facade, Composite, Visitor, **Strategy** patterns)
+- ✅ **16 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment, Weight Scaling, **Weight Caching & PnL Tracing**
+- ✅ **Production-ready** architecture (Facade, Composite, Visitor, Strategy patterns)
 - ✅ **Data pipeline**: Parquet → DuckDB → xarray → AlphaCanvas (~5.38ms per field)
 - ✅ **Operator library**: TsMean, TsAny, Rank, CsQuantile, Constant, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
 - ✅ **Universe masking**: Automatic double-masking with 13.6% overhead
@@ -212,6 +227,7 @@ The complete MVP foundation has:
 - ✅ **Quantile Bucketing**: Independent and dependent sort for Fama-French portfolios
 - ✅ **Signal Assignment**: Lazy assignment with implicit canvas and traceability (Phase 7D)
 - ✅ **Weight Scaling**: Strategy Pattern with GrossNetScaler (vectorized, 7-40ms, target_gross=2.0, target_net=0.0)
+- ✅ **Weight Caching**: Dual-cache architecture (signals + weights) for step-by-step PnL tracing and efficient scaler comparison
 
 ---
 
