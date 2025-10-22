@@ -22,6 +22,7 @@ poetry run python showcase/12_cs_quantile.py
 poetry run python showcase/13_signal_assignment.py
 poetry run python showcase/14_weight_scaling.py
 poetry run python showcase/15_weight_caching_pnl.py
+poetry run python showcase/16_backtest_attribution.py
 ```
 
 Or run all showcases in sequence:
@@ -202,6 +203,18 @@ poetry run python showcase/run_all.py
 
 **Key Features**: Dual-cache architecture, step-by-step weight caching, efficient scaler swapping, PnL tracing foundation, rc.get_weights() API, signal persistence, weight renewal
 
+### 16. Backtest & Attribution (`16_backtest_attribution.py`)
+- Automatic backtest execution when scaler provided
+- Position-level returns (T, N) for winner/loser attribution
+- On-demand daily and cumulative PnL aggregation
+- Shift-mask workflow preventing forward-looking bias
+- Re-masking preventing NaN pollution from universe exits
+- Efficient scaler comparison (signal cache reused)
+- Step-by-step PnL decomposition
+- Cumsum-based fair strategy comparison
+
+**Key Features**: Triple-cache architecture (signal + weight + port_return), position-level attribution, shift-mask workflow, forward-bias prevention, winner/loser analysis, rc.get_port_return(), rc.get_daily_pnl(), rc.get_cumulative_pnl()
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:
@@ -215,9 +228,9 @@ All showcases should complete with `[SUCCESS]` verdicts, demonstrating that the 
 ## Foundation Test Results
 
 The complete MVP foundation has:
-- ✅ **165 tests passing** (100% success rate)
-- ✅ **18 experiments validated** (all SUCCESS)
-- ✅ **16 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment, Weight Scaling, **Weight Caching & PnL Tracing**
+- ✅ **176 tests passing** (100% success rate)
+- ✅ **19 experiments validated** (all SUCCESS)
+- ✅ **17 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment, Weight Scaling, Weight Caching, **Backtesting with Portfolio Returns**
 - ✅ **Production-ready** architecture (Facade, Composite, Visitor, Strategy patterns)
 - ✅ **Data pipeline**: Parquet → DuckDB → xarray → AlphaCanvas (~5.38ms per field)
 - ✅ **Operator library**: TsMean, TsAny, Rank, CsQuantile, Constant, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
@@ -228,6 +241,7 @@ The complete MVP foundation has:
 - ✅ **Signal Assignment**: Lazy assignment with implicit canvas and traceability (Phase 7D)
 - ✅ **Weight Scaling**: Strategy Pattern with GrossNetScaler (vectorized, 7-40ms, target_gross=2.0, target_net=0.0)
 - ✅ **Weight Caching**: Dual-cache architecture (signals + weights) for step-by-step PnL tracing and efficient scaler comparison
+- ✅ **Backtesting**: Triple-cache with position-level returns, shift-mask workflow, forward-bias prevention, winner/loser attribution (7ms for 252×100)
 
 ---
 

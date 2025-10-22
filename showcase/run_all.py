@@ -44,7 +44,18 @@ def main():
         '02_datapanel_model.py',
         '03_expression_visitor.py',
         '04_facade_complete.py',
-        '05_parquet_data_loading.py'
+        '05_parquet_data_loading.py',
+        '06_ts_mean_operator.py',
+        '07_ts_any_surge_detection.py',
+        '08_rank_market_cap.py',
+        '09_universe_masking.py',
+        '10_boolean_expressions.py',
+        '11_data_accessor.py',
+        '12_cs_quantile.py',
+        '13_signal_assignment.py',
+        '14_weight_scaling.py',
+        '15_weight_caching_pnl.py',
+        '16_backtest_attribution.py'
     ]
     
     results = {}
