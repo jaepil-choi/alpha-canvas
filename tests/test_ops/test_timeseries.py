@@ -309,13 +309,13 @@ class TestTsMeanCaching:
         visitor.evaluate(expr)
         
         # Should have 2 steps cached: step 0 (Field), step 1 (TsMean)
-        assert len(visitor._cache) == 2
+        assert len(visitor._signal_cache) == 2
         
         # Check step 0 is Field
-        assert 'Field' in visitor._cache[0][0]
+        assert 'Field' in visitor._signal_cache[0][0]
         
         # Check step 1 is TsMean
-        assert 'TsMean' in visitor._cache[1][0]
+        assert 'TsMean' in visitor._signal_cache[1][0]
     
     def test_ts_mean_cached_data_matches_result(self):
         """Test that cached data matches the final result."""
@@ -332,7 +332,7 @@ class TestTsMeanCaching:
         result = visitor.evaluate(expr)
         
         # Get cached TsMean result (step 1)
-        cached_result = visitor._cache[1][1]
+        cached_result = visitor._signal_cache[1][1]
         
         # Should be identical
         assert np.allclose(result.values, cached_result.values, equal_nan=True)
@@ -359,7 +359,7 @@ class TestTsMeanIntegration:
         result = visitor.evaluate(outer_expr)
         
         # Should have 3 steps: Field, inner TsMean, outer TsMean
-        assert len(visitor._cache) == 3
+        assert len(visitor._signal_cache) == 3
         
         # Result shape preserved
         assert result.shape == (5, 2)

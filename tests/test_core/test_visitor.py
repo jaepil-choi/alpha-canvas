@@ -46,7 +46,7 @@ class TestEvaluateVisitor:
         
         assert visitor is not None
         assert visitor._step_counter == 0
-        assert len(visitor._cache) == 0
+        assert len(visitor._signal_cache) == 0
     
     def test_visit_field(self, test_dataset):
         """Test visiting Field expression."""
@@ -58,7 +58,7 @@ class TestEvaluateVisitor:
         assert isinstance(result, xr.DataArray)
         assert result.shape == (100, 50)
         assert visitor._step_counter == 1  # Incremented after caching
-        assert 0 in visitor._cache  # Step 0 cached
+        assert 0 in visitor._signal_cache  # Step 0 cached
     
     def test_cache_structure(self, test_dataset):
         """Test cache stores (name, DataArray) tuples."""
@@ -67,7 +67,7 @@ class TestEvaluateVisitor:
         
         _ = visitor.evaluate(field)
         
-        cached_entry = visitor._cache[0]
+        cached_entry = visitor._signal_cache[0]
         assert isinstance(cached_entry, tuple)
         assert len(cached_entry) == 2
         
@@ -109,13 +109,13 @@ class TestEvaluateVisitor:
         # First evaluation
         _ = visitor.evaluate(Field('returns'))
         assert visitor._step_counter == 1
-        assert len(visitor._cache) == 1
+        assert len(visitor._signal_cache) == 1
         
         # Second evaluation should reset
         _ = visitor.evaluate(Field('mcap'))
         assert visitor._step_counter == 1  # Reset to 0, then incremented
-        assert len(visitor._cache) == 1  # Only one entry from latest eval
-        assert 0 in visitor._cache
+        assert len(visitor._signal_cache) == 1  # Only one entry from latest eval
+        assert 0 in visitor._signal_cache
     
     def test_multiple_fields_sequential(self, test_dataset):
         """Test evaluating multiple fields sequentially (without reset)."""
@@ -123,7 +123,7 @@ class TestEvaluateVisitor:
         
         # Reset cache manually to test sequential evaluation
         visitor._step_counter = 0
-        visitor._cache = {}
+        visitor._signal_cache = {}
         
         # Visit fields directly (bypass evaluate reset)
         field1 = Field('returns')
@@ -133,13 +133,13 @@ class TestEvaluateVisitor:
         _ = field2.accept(visitor)
         
         assert visitor._step_counter == 2
-        assert len(visitor._cache) == 2
-        assert 0 in visitor._cache
-        assert 1 in visitor._cache
+        assert len(visitor._signal_cache) == 2
+        assert 0 in visitor._signal_cache
+        assert 1 in visitor._signal_cache
         
         # Check both are cached correctly
-        name0, data0 = visitor._cache[0]
-        name1, data1 = visitor._cache[1]
+        name0, data0 = visitor._signal_cache[0]
+        name1, data1 = visitor._signal_cache[1]
         
         assert 'returns' in name0
         assert 'mcap' in name1

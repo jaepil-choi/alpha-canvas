@@ -386,9 +386,9 @@ class TestCsQuantileIntegration:
         result = visitor.evaluate(expr)
         
         # Check cache contains both Field and CsQuantile steps
-        assert len(visitor._cache) == 2
-        assert 'Field_market_cap' in visitor._cache[0][0]
-        assert 'CsQuantile' in visitor._cache[1][0]
+        assert len(visitor._signal_cache) == 2
+        assert 'Field_market_cap' in visitor._signal_cache[0][0]
+        assert 'CsQuantile' in visitor._signal_cache[1][0]
     
     def test_group_by_field_not_found_raises_error(self):
         """Test that missing group_by field raises clear error."""

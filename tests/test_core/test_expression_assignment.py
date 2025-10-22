@@ -227,7 +227,7 @@ class TestVisitorAppliesAssignments:
         # Step 0: Field('returns')
         # Step 1: TsMean result (base)
         # Step 2+: After assignments (final)
-        assert len(visitor._cache) >= 3, "Should cache at least 3 steps (Field, TsMean base, final)"
+        assert len(visitor._signal_cache) >= 3, "Should cache at least 3 steps (Field, TsMean base, final)"
     
     def test_no_assignments_skips_special_handling(self):
         """Expression without assignments evaluates normally."""

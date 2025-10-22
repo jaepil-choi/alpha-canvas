@@ -258,15 +258,15 @@ class TestRankIntegration:
         result = expr.accept(visitor)
         
         # Assert: Check cached steps
-        assert len(visitor._cache) >= 2, "Should have at least 2 steps (Field + Rank)"
+        assert len(visitor._signal_cache) >= 2, "Should have at least 2 steps (Field + Rank)"
         
         # Verify Field was cached
-        assert 'Field' in visitor._cache[0][0], "Step 0 should be Field"
+        assert 'Field' in visitor._signal_cache[0][0], "Step 0 should be Field"
         
         # Verify Rank was cached
-        assert 'Rank' in visitor._cache[1][0], "Step 1 should be Rank"
+        assert 'Rank' in visitor._signal_cache[1][0], "Step 1 should be Rank"
         
         # Verify cached result
-        cached_result = visitor._cache[1][1]
+        cached_result = visitor._signal_cache[1][1]
         np.testing.assert_array_equal(cached_result.values, result.values)
 
