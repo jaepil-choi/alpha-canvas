@@ -62,12 +62,16 @@ class EvaluateVisitor:
         self._data_loader = data_loader
         self._universe_mask: Optional[xr.DataArray] = None  # Set by AlphaCanvas
         
-        # Dual-cache architecture for PnL tracing
+        # Triple-cache architecture for PnL tracing
         self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}  # Persistent
         self._weight_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # Renewable
+        self._port_return_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # Renewable
         
         self._step_counter = 0
         self._scaler: Optional['WeightScaler'] = None  # Current scaler
+        
+        # Return data for backtesting (set by AlphaCanvas)
+        self._returns_data: Optional[xr.DataArray] = None
     
     def evaluate(self, expr, scaler: Optional['WeightScaler'] = None) -> xr.DataArray:
         """Evaluate expression and cache both signal and weights at each step.
@@ -124,12 +128,14 @@ class EvaluateVisitor:
         scaler_changed = (scaler is not None and scaler is not self._scaler)
         
         if scaler_changed:
-            # Scaler changed: reset weight cache
+            # Scaler changed: reset weight and port_return caches
             self._weight_cache = {}
+            self._port_return_cache = {}
             self._scaler = scaler
         elif scaler is None:
-            # No scaler: clear weight cache
+            # No scaler: clear weight and port_return caches
             self._weight_cache = {}
+            self._port_return_cache = {}
             self._scaler = None
         
         # Evaluate base expression (tree traversal, populates signal_cache and weight_cache)
@@ -140,7 +146,7 @@ class EvaluateVisitor:
         if assignments:
             # Cache base result for traceability
             base_name = f"{expr.__class__.__name__}_base"
-            self._cache_signal_and_weights(base_name, base_result)
+            self._cache_signal_weights_and_returns(base_name, base_result)
             
             # Apply assignments sequentially
             final_result = self._apply_assignments(base_result, assignments)
@@ -151,7 +157,7 @@ class EvaluateVisitor:
             
             # Cache final result
             final_name = f"{expr.__class__.__name__}_with_assignments"
-            self._cache_signal_and_weights(final_name, final_result)
+            self._cache_signal_weights_and_returns(final_name, final_result)
             
             return final_result
         
@@ -248,7 +254,7 @@ class EvaluateVisitor:
         if self._universe_mask is not None:
             result = result.where(self._universe_mask, np.nan)
         
-        self._cache_signal_and_weights(f"Field_{node.name}", result)
+        self._cache_signal_weights_and_returns(f"Field_{node.name}", result)
         return result
     
     def visit_constant(self, node) -> xr.DataArray:
@@ -282,7 +288,7 @@ class EvaluateVisitor:
         # Universe masking is applied by OUTPUT MASKING in visit_operator
         # or by evaluate() after assignments
         
-        self._cache_signal_and_weights(f"Constant_{node.value}", result)
+        self._cache_signal_weights_and_returns(f"Constant_{node.value}", result)
         return result
     
     def visit_operator(self, node) -> xr.DataArray:
@@ -349,7 +355,7 @@ class EvaluateVisitor:
                 result = result.where(self._universe_mask, np.nan)
             
             # 5. Cache
-            self._cache_signal_and_weights("CsQuantile", result)
+            self._cache_signal_weights_and_returns("CsQuantile", result)
             return result
         
         # 1. Traversal: evaluate child/children expressions
@@ -382,76 +388,119 @@ class EvaluateVisitor:
         
         # 4. State collection: cache result with step counter
         operator_name = node.__class__.__name__
-        self._cache_signal_and_weights(operator_name, result)
+        self._cache_signal_weights_and_returns(operator_name, result)
         
         return result
     
-    def _cache_signal_and_weights(self, name: str, signal: xr.DataArray):
-        """Cache signal and compute/cache weights if scaler is present.
-        
-        Stores the signal in _signal_cache. If a scaler is configured,
-        also computes and caches weights in _weight_cache.
+    def _cache_signal_weights_and_returns(self, name: str, signal: xr.DataArray):
+        """Cache signal, weights, and portfolio returns at each step.
         
         Args:
-            name: Descriptive name for this step (e.g., 'Field_returns', 'TsMean')
+            name: Descriptive name for this step
             signal: Signal DataArray to cache
         
         Note:
-            - Signal always cached in _signal_cache
-            - If scaler present: weights computed and cached in _weight_cache
-            - If scaler None: _weight_cache not updated for this step
-            - If scaling fails (e.g., categorical data), None cached for weights
-            - Step counter is incremented AFTER caching
+            - Signal always cached
+            - If scaler present: weights and portfolio returns computed and cached
+            - If scaler None: only signal cached
+            - Portfolio returns use shift-mask-multiply workflow
         """
         # Always cache signal
         self._signal_cache[self._step_counter] = (name, signal)
         
-        # Cache weights if scaler present
+        # Cache weights and portfolio returns if scaler present
         if self._scaler is not None:
             try:
+                # Compute weights
                 weights = self._scaler.scale(signal)
                 self._weight_cache[self._step_counter] = (name, weights)
+                
+                # Compute portfolio returns (if returns data available)
+                if self._returns_data is not None:
+                    port_return = self._compute_portfolio_returns(weights)
+                    self._port_return_cache[self._step_counter] = (name, port_return)
+                else:
+                    self._port_return_cache[self._step_counter] = (name, None)
+                    
             except Exception as e:
                 # If scaling fails (e.g., categorical data), cache None
-                # This allows mixed step types (some scalable, some not)
                 self._weight_cache[self._step_counter] = (name, None)
+                self._port_return_cache[self._step_counter] = (name, None)
         
         self._step_counter += 1
     
-    def recalculate_weights_with_scaler(self, scaler: 'WeightScaler'):
-        """Recalculate all weights from existing signal cache with new scaler.
+    def _compute_portfolio_returns(self, weights: xr.DataArray) -> xr.DataArray:
+        """Compute position-level portfolio returns with shift-mask workflow.
         
-        This enables efficient strategy comparison without re-evaluation.
-        The signal cache remains unchanged (efficient!), only weights
-        are recalculated.
+        Args:
+            weights: (T, N) portfolio weights from scaler
+        
+        Returns:
+            (T, N) position-level returns (weights * returns, element-wise)
+        
+        Workflow:
+            1. Shift weights by 1 day (trade on yesterday's signal)
+            2. Re-mask with current universe (liquidate exited positions)
+            3. Mask returns with universe
+            4. Element-wise multiply: port_return = weights * returns
+        
+        Note:
+            - Preserves (T, N) shape for attribution analysis
+            - Re-masking prevents NaN pollution from universe exits
+            - Aggregation (sum, cumsum) done on-demand by user
+        """
+        # Step 1: Shift weights (trade on yesterday's signal)
+        weights_shifted = weights.shift(time=1)
+        
+        # Step 2: Re-mask with current universe (critical!)
+        if self._universe_mask is not None:
+            final_weights = weights_shifted.where(self._universe_mask)
+        else:
+            final_weights = weights_shifted
+        
+        # Step 3: Mask returns
+        if self._universe_mask is not None:
+            returns_masked = self._returns_data.where(self._universe_mask)
+        else:
+            returns_masked = self._returns_data
+        
+        # Step 4: Element-wise multiply (KEEP (T, N) SHAPE!)
+        port_return = final_weights * returns_masked
+        
+        return port_return
+    
+    def recalculate_weights_with_scaler(self, scaler: 'WeightScaler'):
+        """Recalculate weights AND portfolio returns from signal cache with new scaler.
         
         Args:
             scaler: New WeightScaler to apply
         
         Note:
             - Signal cache unchanged (efficient!)
-            - Weight cache completely recalculated
-            - Used when user wants to compare different scaling strategies
-        
-        Example:
-            >>> # Initial evaluation
-            >>> visitor.evaluate(expr, scaler=DollarNeutralScaler())
-            >>> 
-            >>> # Later: swap scaler without re-evaluation
-            >>> visitor.recalculate_weights_with_scaler(GrossNetScaler(2.0, 0.3))
+            - Weight cache and port_return cache recalculated
         """
         self._scaler = scaler
         self._weight_cache = {}
+        self._port_return_cache = {}
         
         for step_idx in sorted(self._signal_cache.keys()):
             name, signal = self._signal_cache[step_idx]
             
             try:
+                # Recalculate weights
                 weights = scaler.scale(signal)
                 self._weight_cache[step_idx] = (name, weights)
+                
+                # Recalculate portfolio returns
+                if self._returns_data is not None:
+                    port_return = self._compute_portfolio_returns(weights)
+                    self._port_return_cache[step_idx] = (name, port_return)
+                else:
+                    self._port_return_cache[step_idx] = (name, None)
+                    
             except Exception:
-                # Scaling failed (e.g., categorical data)
                 self._weight_cache[step_idx] = (name, None)
+                self._port_return_cache[step_idx] = (name, None)
     
     def get_cached_signal(self, step: int) -> Tuple[str, xr.DataArray]:
         """Retrieve cached signal by step number.
@@ -498,6 +547,23 @@ class EvaluateVisitor:
         if step not in self._weight_cache:
             return (self._signal_cache[step][0], None)
         return self._weight_cache[step]
+    
+    def get_cached_port_return(self, step: int) -> Tuple[str, Optional[xr.DataArray]]:
+        """Retrieve cached portfolio returns by step number.
+        
+        Args:
+            step: Step index (0-indexed)
+        
+        Returns:
+            Tuple of (name, port_return DataArray or None)
+        
+        Note:
+            - port_return is None if no scaler used or if returns not available
+            - port_return is (T, N) shape - position-level for attribution
+        """
+        if step not in self._port_return_cache:
+            return (self._signal_cache[step][0], None)
+        return self._port_return_cache[step]
     
     def get_cached(self, step: int) -> Tuple[str, xr.DataArray]:
         """Retrieve cached signal by step number (backward compatibility).

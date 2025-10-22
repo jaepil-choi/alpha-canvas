@@ -135,6 +135,10 @@ class AlphaCanvas:
         self._universe_mask: Optional[xr.DataArray] = None
         if universe is not None:
             self._set_initial_universe(universe)
+        
+        # Load return data (MANDATORY for backtesting)
+        self._returns: Optional[xr.DataArray] = None
+        self._load_returns_data()
     
     def _set_initial_universe(self, universe: Union[Expression, xr.DataArray]) -> None:
         """Set universe mask at initialization (one-time only).
@@ -173,6 +177,62 @@ class AlphaCanvas:
         # Pass to evaluator for auto-application
         self._evaluator._universe_mask = self._universe_mask
     
+    def _load_returns_data(self):
+        """Load return data from config (mandatory for backtesting).
+        
+        Raises:
+            ValueError: If 'returns' field not found in config
+            ValueError: If returns data shape doesn't match panel
+        
+        Note:
+            - Returns are loaded once at initialization
+            - Stored in self._returns for backtest calculations
+            - Field name is hardcoded as 'returns'
+        """
+        # Skip if no data_loader (manual initialization without date range)
+        if self._data_loader is None:
+            return
+        
+        # Skip if panel not yet initialized (lazy initialization)
+        if self._panel is None:
+            return
+        
+        # Check if 'returns' field exists in config
+        if 'returns' not in self._config.data_config:
+            raise ValueError(
+                "Return data is mandatory for backtesting. "
+                "Missing 'returns' field in config/data.yaml. "
+                "Please add a 'returns' field definition."
+            )
+        
+        # Load returns data
+        returns_data = self._data_loader.load_field('returns')
+        
+        # Validate shape
+        expected_shape = (
+            len(self._panel.db.coords['time']),
+            len(self._panel.db.coords['asset'])
+        )
+        if returns_data.shape != expected_shape:
+            raise ValueError(
+                f"Returns data shape mismatch. "
+                f"Expected {expected_shape}, got {returns_data.shape}"
+            )
+        
+        # Store returns
+        self._returns = returns_data
+        
+        # Also add to panel for user access
+        self._panel.add_data('returns', returns_data)
+        
+        # Re-sync evaluator
+        self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+        if self._universe_mask is not None:
+            self._evaluator._universe_mask = self._universe_mask
+        
+        # Pass returns to evaluator for backtest
+        self._evaluator._returns_data = self._returns
+    
     @property
     def universe(self) -> Optional[xr.DataArray]:
         """Get current universe mask (read-only).
@@ -185,6 +245,22 @@ class AlphaCanvas:
             >>> print(f"Universe coverage: {rc.universe.sum().values} stocks")
         """
         return self._universe_mask
+    
+    @property
+    def returns(self) -> xr.DataArray:
+        """Read-only access to return data.
+        
+        Returns:
+            (T, N) DataArray with return values
+        
+        Note:
+            Returns are auto-loaded at initialization
+        
+        Example:
+            >>> rc = AlphaCanvas(start_date='2024-01-01', end_date='2024-12-31')
+            >>> print(f"Mean return: {rc.returns.mean().values:.4f}")
+        """
+        return self._returns
     
     @property
     def db(self) -> xr.Dataset:
@@ -282,11 +358,18 @@ class AlphaCanvas:
             
             self._panel.add_data(name, result)
             
+            # Auto-load returns after panel initialization (mandatory for backtesting)
+            if self._returns is None and self._data_loader is not None:
+                self._load_returns_data()
+            
             # Re-sync evaluator with updated dataset
             self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
             # Preserve universe mask reference
             if self._universe_mask is not None:
                 self._evaluator._universe_mask = self._universe_mask
+            # Pass returns to evaluator for backtest
+            if self._returns is not None:
+                self._evaluator._returns_data = self._returns
         else:
             # Direct injection path (Open Toolkit pattern)
             # Apply universe mask to injected data
@@ -301,11 +384,18 @@ class AlphaCanvas:
             
             self._panel.add_data(name, data)
 
+            # Auto-load returns after panel initialization (mandatory for backtesting)
+            if self._returns is None and self._data_loader is not None:
+                self._load_returns_data()
+
             # Re-sync evaluator with updated dataset
             self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
             # Preserve universe mask reference
             if self._universe_mask is not None:
                 self._evaluator._universe_mask = self._universe_mask
+            # Pass returns to evaluator for backtest
+            if self._returns is not None:
+                self._evaluator._returns_data = self._returns
     
     def evaluate(self, expr: Expression, scaler: Optional['WeightScaler'] = None) -> xr.DataArray:
         """Evaluate an Expression and return the result (signal).
@@ -393,6 +483,84 @@ class AlphaCanvas:
         """
         _, weights = self._evaluator.get_cached_weights(step)
         return weights
+    
+    def get_port_return(self, step: int) -> Optional[xr.DataArray]:
+        """Get cached position-level portfolio returns for a specific step.
+        
+        Args:
+            step: Step index (0-indexed)
+        
+        Returns:
+            (T, N) DataArray with position-level returns, or None if no scaler used
+        
+        Note:
+            - Returns are element-wise: weights[t] * returns[t]
+            - Shape (T, N) preserved for winner/loser attribution
+            - To aggregate: port_return.sum(dim='asset') for daily PnL
+        
+        Example:
+            >>> result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+            >>> port_return = rc.get_port_return(1)
+            >>> # Winner/loser analysis
+            >>> total_contrib = port_return.sum(dim='time')
+            >>> best_stock = total_contrib.argmax(dim='asset')
+        """
+        _, port_return = self._evaluator.get_cached_port_return(step)
+        return port_return
+
+    def get_daily_pnl(self, step: int) -> Optional[xr.DataArray]:
+        """Get daily PnL for a specific step (aggregated across assets).
+        
+        Args:
+            step: Step index (0-indexed)
+        
+        Returns:
+            (T,) DataArray with daily PnL, or None if no scaler used
+        
+        Note:
+            - Computed on-demand from position-level returns
+            - Aggregates across asset dimension: sum(dim='asset')
+        
+        Example:
+            >>> result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+            >>> daily_pnl = rc.get_daily_pnl(2)
+            >>> print(f"Mean daily PnL: {daily_pnl.mean().values:.4f}")
+            >>> print(f"Sharpe: {daily_pnl.mean() / daily_pnl.std() * np.sqrt(252):.2f}")
+        """
+        port_return = self.get_port_return(step)
+        if port_return is None:
+            return None
+        
+        # Aggregate across assets (on-demand)
+        daily_pnl = port_return.sum(dim='asset')
+        return daily_pnl
+
+    def get_cumulative_pnl(self, step: int) -> Optional[xr.DataArray]:
+        """Get cumulative PnL for a specific step.
+        
+        Args:
+            step: Step index (0-indexed)
+        
+        Returns:
+            (T,) DataArray with cumulative PnL, or None if no scaler used
+        
+        Note:
+            - Computed on-demand: daily_pnl.cumsum(dim='time')
+            - Uses cumsum (not cumprod) for time-invariant comparison
+        
+        Example:
+            >>> result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+            >>> cum_pnl = rc.get_cumulative_pnl(2)
+            >>> final_pnl = cum_pnl.isel(time=-1).values
+            >>> print(f"Final PnL: {final_pnl:.4f}")
+        """
+        daily_pnl = self.get_daily_pnl(step)
+        if daily_pnl is None:
+            return None
+        
+        # Cumulative sum (on-demand)
+        cumulative_pnl = daily_pnl.cumsum(dim='time')
+        return cumulative_pnl
     
     def scale_weights(
         self, 
