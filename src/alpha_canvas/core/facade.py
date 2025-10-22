@@ -335,5 +335,46 @@ class AlphaCanvas:
             >>> result = rc.evaluate(expr)  # Do this instead!
         """
         return self._evaluator.evaluate(expr)
+    
+    def scale_weights(
+        self, 
+        signal: Union[Expression, xr.DataArray],
+        scaler: 'WeightScaler'
+    ) -> xr.DataArray:
+        """Scale signal to portfolio weights using Strategy Pattern.
+        
+        Args:
+            signal: Expression or DataArray with signal values
+            scaler: WeightScaler strategy instance (REQUIRED - no default)
+        
+        Returns:
+            (T, N) DataArray with portfolio weights
+        
+        Design Note:
+            Scaler is a required parameter (no default). This enforces
+            explicit strategy selection, making it easy to compare different
+            scaling approaches in research workflows.
+        
+        Example:
+            >>> from alpha_canvas.portfolio import DollarNeutralScaler
+            >>> signal = ts_mean(Field('returns'), 5)
+            >>> scaler = DollarNeutralScaler()
+            >>> weights = rc.scale_weights(signal, scaler)
+            >>> 
+            >>> # Easy to swap strategies
+            >>> from alpha_canvas.portfolio import GrossNetScaler
+            >>> scaler2 = GrossNetScaler(target_gross=2.0, target_net=0.3)
+            >>> weights2 = rc.scale_weights(signal, scaler2)
+        """
+        # Evaluate if Expression
+        if hasattr(signal, 'accept'):
+            signal_data = self.evaluate(signal)
+        else:
+            signal_data = signal
+        
+        # Apply scaling strategy (delegation)
+        weights = scaler.scale(signal_data)
+        
+        return weights
 
 
