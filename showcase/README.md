@@ -20,6 +20,7 @@ poetry run python showcase/10_boolean_expressions.py
 poetry run python showcase/11_data_accessor.py
 poetry run python showcase/12_cs_quantile.py
 poetry run python showcase/13_signal_assignment.py
+poetry run python showcase/14_weight_scaling.py
 ```
 
 Or run all showcases in sequence:
@@ -172,6 +173,20 @@ poetry run python showcase/run_all.py
 
 **Key Features**: Lazy assignment, Constant Expression, implicit canvas, sequential application semantics, Visitor integration, traceability, Fama-French factor construction
 
+### 14. Portfolio Weight Scaling - Strategy Pattern (`14_weight_scaling.py`)
+- Strategy Pattern for weight scaling (easy to swap and extend)
+- GrossNetScaler: Unified gross/net exposure framework (vectorized)
+- DollarNeutralScaler: Convenience wrapper (L=1.0, S=-1.0)
+- One-sided signal handling (gross target always met)
+- NaN preservation (universe integration)
+- Comparison of different scaling strategies
+- Default parameters: `target_gross=2.0`, `target_net=0.0`
+- Performance: 7-40ms for typical datasets
+- Explicit scaler selection (no default scaler)
+- Easy extensibility: SoftmaxScaler, RiskTargetScaler, etc.
+
+**Key Features**: Strategy Pattern, GrossNetScaler vectorized algorithm, dollar-neutral portfolio, net-long bias, stateless design, explicit strategy selection, performance validated
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:
@@ -185,10 +200,10 @@ All showcases should complete with `[SUCCESS]` verdicts, demonstrating that the 
 ## Foundation Test Results
 
 The complete MVP foundation has:
-- ✅ **137 tests passing** (100% success rate)
-- ✅ **17 experiments validated** (all SUCCESS)
-- ✅ **14 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment
-- ✅ **Production-ready** architecture (Facade, Composite, Visitor patterns)
+- ✅ **154 tests passing** (100% success rate)
+- ✅ **18 experiments validated** (all SUCCESS)
+- ✅ **15 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment, **Weight Scaling**
+- ✅ **Production-ready** architecture (Facade, Composite, Visitor, **Strategy** patterns)
 - ✅ **Data pipeline**: Parquet → DuckDB → xarray → AlphaCanvas (~5.38ms per field)
 - ✅ **Operator library**: TsMean, TsAny, Rank, CsQuantile, Constant, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
 - ✅ **Universe masking**: Automatic double-masking with 13.6% overhead
@@ -196,6 +211,7 @@ The complete MVP foundation has:
 - ✅ **Selector Interface**: `rc.data` accessor with Field Expressions (Phase 7B)
 - ✅ **Quantile Bucketing**: Independent and dependent sort for Fama-French portfolios
 - ✅ **Signal Assignment**: Lazy assignment with implicit canvas and traceability (Phase 7D)
+- ✅ **Weight Scaling**: Strategy Pattern with GrossNetScaler (vectorized, 7-40ms, target_gross=2.0, target_net=0.0)
 
 ---
 
