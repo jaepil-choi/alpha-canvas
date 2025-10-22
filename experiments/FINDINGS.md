@@ -1956,13 +1956,227 @@ def _apply_assignments(self, base_result, assignments):
 #### Next Steps
 
 1. ✅ Experiment validated lazy evaluation pattern
-2. **IN PROGRESS**: Write TDD tests for Expression.__setitem__
-3. **TODO**: Implement assignment storage in Expression base class
-4. **TODO**: Implement _apply_assignments in Visitor
-5. **TODO**: Modify evaluate() to handle assignments
-6. **TODO**: Create Constant expression class
-7. **TODO**: Run tests until all pass (green phase)
-8. **TODO**: Create showcase demonstrating all patterns
-9. **TODO**: Update documentation
+2. ✅ Write TDD tests for Expression.__setitem__
+3. ✅ Implement assignment storage in Expression base class
+4. ✅ Implement _apply_assignments in Visitor
+5. ✅ Modify evaluate() to handle assignments
+6. ✅ Create Constant expression class
+7. ✅ Run tests until all pass (green phase)
+8. ✅ Create showcase demonstrating all patterns
+9. ✅ Update documentation
+
+---
+
+## Phase 15: Portfolio Weight Scaling (F5)
+
+### Experiment 18: Vectorized Weight Scaling Validation
+
+**Date**: 2025-01-22  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated fully vectorized GrossNetScaler implementation with unified Gross/Net exposure framework. All scenarios pass including edge cases (one-sided signals, all-zero signals). Performance excellent at 7-40ms for various dataset sizes. No iteration required.
+
+#### Key Discoveries
+
+1. **Vectorized Gross-Target Scaling (Core Algorithm)**
+   - **Pattern**: Always meet gross target via final scaling step
+   - **Formula**: 
+     - $L_{\text{target}} = \frac{G + N}{2}$, $S_{\text{target}} = \frac{G - N}{2}$
+     - Normalize positive/negative signals separately
+     - Apply L_target and S_target
+     - Calculate actual_gross and scale: `weights * (target_gross / actual_gross)`
+   - **Result**: Gross target always met, even for one-sided signals
+   - **Net Target**: May be unachievable for one-sided signals (by design)
+
+2. **All-Zero Signal Handling**
+   - **Challenge**: `0 / 0` results in NaN, not 0
+   - **Solution 1**: `fillna(0.0)` after normalization step
+   - **Solution 2**: `xr.where(actual_gross > 0, target_gross / actual_gross, 1.0)` for scale_factor
+   - **Solution 3**: Final `fillna(0.0)` before universe mask application
+   - **Result**: All-zero signals → all-zero weights (correct)
+
+3. **One-Sided Signal Behavior**
+   - **All Positive**: Long = target_gross, Short = 0, Net = target_gross (not target_net)
+   - **All Negative**: Long = 0, Short = -target_gross, Net = -target_gross (not target_net)
+   - **Design Decision**: This is correct behavior - gross target takes priority
+   - **Warning**: In production, should emit WARNING when net target unachievable
+
+4. **NaN Preservation (Universe Integration)**
+   - **Critical**: Apply `fillna(0.0)` BEFORE universe mask, not after
+   - **Order**: Computation NaN → 0.0, then Universe mask → NaN
+   - **Result**: Universe positions correctly preserved as NaN
+   - **Validation**: Scenario 4 passes with 22 NaN positions maintained
+
+5. **Performance Characteristics**
+   - **Small (10×6)**: 7ms per scale
+   - **Medium (100×50)**: 7ms per scale
+   - **1Y Daily (252×100)**: 8ms per scale
+   - **Large (1000×500)**: 34ms per scale
+   - **Conclusion**: Performance scales excellently, no bottlenecks
+
+6. **Vectorization Benefits**
+   - **No Iteration**: Zero Python-level loops (pure xarray/numpy operations)
+   - **Speedup**: 10x-220x faster than iterative `groupby('time').map()` approach
+   - **Scalability**: Performance stays consistent across dataset sizes
+   - **Code Clarity**: Cleaner, more readable than iterative version
+
+#### Implementation Pattern Established
+
+**Fully Vectorized GrossNetScaler**:
+
+```python
+def scale_grossnet(signal: xr.DataArray, target_gross: float, target_net: float) -> xr.DataArray:
+    """Fully vectorized weight scaler - NO ITERATION!"""
+    # Calculate targets
+    L_target = (target_gross + target_net) / 2.0
+    S_target = (target_net - target_gross) / 2.0  # Negative
+    
+    # Step 1: Separate positive/negative (vectorized)
+    s_pos = signal.where(signal > 0, 0.0)
+    s_neg = signal.where(signal < 0, 0.0)
+    
+    # Step 2: Sum along asset dimension (vectorized)
+    sum_pos = s_pos.sum(dim='asset', skipna=True)
+    sum_neg = s_neg.sum(dim='asset', skipna=True)
+    
+    # Step 3: Normalize (vectorized, handles 0/0 → nan → 0)
+    norm_pos = (s_pos / sum_pos).fillna(0.0)
+    norm_neg_abs = (np.abs(s_neg) / np.abs(sum_neg)).fillna(0.0)
+    
+    # Step 4: Apply L/S targets (vectorized)
+    weights_long = norm_pos * L_target
+    weights_short_mag = norm_neg_abs * np.abs(S_target)
+    
+    # Step 5: Combine
+    weights = weights_long - weights_short_mag
+    
+    # Step 6: Calculate actual gross per row (vectorized)
+    actual_gross = np.abs(weights).sum(dim='asset', skipna=True)
+    
+    # Step 7: Scale to meet target gross (vectorized)
+    scale_factor = xr.where(actual_gross > 0, target_gross / actual_gross, 1.0)
+    final_weights = weights * scale_factor
+    
+    # Step 8: Convert computational NaN to 0 (BEFORE universe mask)
+    final_weights = final_weights.fillna(0.0)
+    
+    # Step 9: Apply universe mask (preserves NaN where signal was NaN)
+    final_weights = final_weights.where(~signal.isnull())
+    
+    return final_weights
+```
+
+#### Test Scenarios Validated
+
+**Scenario 1: Dollar Neutral** ✅
+- Target: G=2.0, N=0.0 → L=1.0, S=-1.0
+- Result: All constraints met exactly
+- Performance: 7ms
+
+**Scenario 2: Net Long Bias** ✅
+- Target: G=2.0, N=0.2 → L=1.1, S=-0.9
+- Result: Asymmetric allocation perfect
+- Performance: 7ms
+
+**Scenario 3: Long Only** ✅
+- Target: L=1.0 (ignore negatives)
+- Result: Negatives → 0, positives sum to 1.0
+- Performance: 32ms (uses groupby for simplicity)
+
+**Scenario 4: NaN Preservation** ✅
+- Signal: 22 NaN positions (universe masking)
+- Result: 22 NaN positions in weights (preserved)
+- Verification: NaN positions match exactly
+
+**Scenario 5: Edge Cases** ✅
+- 5a: All positive signals → Gross=2.0, Net=2.0 (one-sided)
+- 5b: All negative signals → Gross=2.0, Net=-2.0 (one-sided)
+- 5c: Single valid asset per timestep → Correct scaling
+- 5d: All-zero signals → All-zero weights (no NaN)
+
+**Scenario 6: Vectorized Edge Cases** ✅
+- Row 0: `[3, 5, 7, 6]` all positive → Gross=2.2, Net=2.2
+- Row 1: `[3, -6, 9, 0]` mixed → Gross=2.2, Net=-0.5 ✓
+- Row 2: `[3, -6, 9, -4]` mixed → Gross=2.2, Net=-0.5 ✓
+- Row 3: `[-2, -5, -1, -9]` all negative → Gross=2.2, Net=-2.2
+- Row 4: `[0, 0, 0, 0]` all zeros → All weights 0.0 (no NaN)
+
+#### Design Decisions
+
+1. **Gross Target Priority**
+   - Gross target ALWAYS met (via final scaling step)
+   - Net target achievable only for mixed signals (has both long/short)
+   - One-sided signals: Net target unachievable by mathematical constraint
+
+2. **Default Parameters**
+   - **Recommended Default**: `target_gross=2.0, target_net=0.0`
+   - Rationale: Dollar-neutral is most common for market-neutral strategies
+   - Represents 100% long + 100% short (200% gross, 0% net)
+
+3. **Stateless Design**
+   - Scalers don't store state
+   - Always pass parameters explicitly
+   - Enables easy comparison of multiple strategies
+
+4. **Cross-Sectional Independence**
+   - Each timestep processed independently (mathematically)
+   - No temporal dependencies (by design)
+   - Vectorized operations respect this independence
+
+#### Lessons Learned
+
+1. **Vectorization Requires Careful Ordering**
+   - `fillna(0.0)` must come BEFORE universe mask
+   - Otherwise universe NaN → 0.0 (incorrect)
+
+2. **Gross-Target Scaling is Robust**
+   - Always achievable via simple scaling: `weights * (G_target / G_actual)`
+   - Handles all edge cases (one-sided, zeros, mixed)
+   - More robust than trying to meet both gross AND net simultaneously
+
+3. **Division by Zero Handling**
+   - `xr.where(condition, value, fallback)` better than `.fillna()` for inf handling
+   - Prevents inf propagation from `0 / 0`
+
+4. **Performance of Pure Vectorization**
+   - 10x-220x faster than iterative approach
+   - Scales excellently to large datasets
+   - Code is actually clearer (less nested loops)
+
+5. **Universe Integration is Clean**
+   - Standard double-masking pattern works perfectly
+   - No special handling needed in scaler
+   - NaN preservation automatic
+
+#### Test Results
+
+- **6 scenarios, ALL PASS** ✅
+- Dollar Neutral: ✅
+- Net Long Bias: ✅
+- Long Only: ✅
+- NaN Preservation: ✅
+- Edge Cases: ✅
+- Vectorized Edge Cases: ✅
+
+#### Performance Benchmarks
+
+| Dataset Size | Time per Scale | Notes |
+|--------------|----------------|-------|
+| Small (10×6) | 7ms | Baseline |
+| Medium (100×50) | 7ms | Same as small! |
+| 1Y Daily (252×100) | 8ms | Minimal increase |
+| Large (1000×500) | 34ms | Still excellent |
+
+**Conclusion**: Vectorized approach is production-ready.
+
+#### Next Steps
+
+1. ✅ Experiment validated vectorized approach
+2. **TODO**: Write TDD tests for WeightScaler classes
+3. **TODO**: Implement GrossNetScaler in src/alpha_canvas/portfolio/
+4. **TODO**: Implement DollarNeutralScaler and LongOnlyScaler
+5. **TODO**: Add AlphaCanvas.scale_weights() facade method
+6. **TODO**: Create showcase demonstrating weight scaling
+7. **TODO**: Update documentation (PRD, Architecture, Implementation)
 
 ---
