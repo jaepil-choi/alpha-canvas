@@ -7,7 +7,10 @@ in depth-first order, caching intermediate results with integer step indices.
 
 import numpy as np
 import xarray as xr
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from alpha_canvas.portfolio.base import WeightScaler
 
 
 class EvaluateVisitor:
@@ -58,11 +61,16 @@ class EvaluateVisitor:
         self._data = data_source
         self._data_loader = data_loader
         self._universe_mask: Optional[xr.DataArray] = None  # Set by AlphaCanvas
-        self._cache: Dict[int, Tuple[str, xr.DataArray]] = {}
+        
+        # Dual-cache architecture for PnL tracing
+        self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}  # Persistent
+        self._weight_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # Renewable
+        
         self._step_counter = 0
+        self._scaler: Optional['WeightScaler'] = None  # Current scaler
     
-    def evaluate(self, expr) -> xr.DataArray:
-        """Evaluate expression and return result, applying assignments if present.
+    def evaluate(self, expr, scaler: Optional['WeightScaler'] = None) -> xr.DataArray:
+        """Evaluate expression and cache both signal and weights at each step.
         
         This is the main entry point for evaluating an Expression tree.
         It resets the cache and step counter before evaluation to ensure
@@ -77,28 +85,54 @@ class EvaluateVisitor:
         4. Applies universe masking to the final result
         5. Caches the final result
         
+        **Weight Caching (Dual-Cache):**
+        If scaler is provided:
+        - Both signal and weights cached at each step
+        - Weights computed by calling scaler.scale(signal) at each step
+        If scaler is None:
+        - Only signals cached, weight cache remains empty
+        Changing scaler:
+        - Signal cache repopulated (always fresh evaluation)
+        - Weight cache recalculated with new scaler
+        
         Args:
             expr: Expression to evaluate
+            scaler: Optional WeightScaler to compute portfolio weights at each step
         
         Returns:
-            xarray.DataArray result of evaluation (with assignments applied if present)
+            xarray.DataArray result of evaluation (signal, not weights)
         
         Example:
-            >>> # Without assignments
+            >>> # Without assignments and without scaler
             >>> field = Field('returns')
             >>> result = visitor.evaluate(field)
+            >>> 
+            >>> # With weight scaling
+            >>> result = visitor.evaluate(field, scaler=DollarNeutralScaler())
             >>> 
             >>> # With assignments (lazy evaluation)
             >>> signal = Field('returns')
             >>> signal[Field('size') == 'small'] = 1.0
             >>> signal[Field('size') == 'big'] = -1.0
-            >>> result = visitor.evaluate(signal)  # Assignments applied here
+            >>> result = visitor.evaluate(signal, scaler=DollarNeutralScaler())
         """
         # Reset state for new evaluation
         self._step_counter = 0
-        self._cache = {}
+        self._signal_cache = {}
         
-        # Evaluate base expression (tree traversal)
+        # Check if scaler changed
+        scaler_changed = (scaler is not None and scaler is not self._scaler)
+        
+        if scaler_changed:
+            # Scaler changed: reset weight cache
+            self._weight_cache = {}
+            self._scaler = scaler
+        elif scaler is None:
+            # No scaler: clear weight cache
+            self._weight_cache = {}
+            self._scaler = None
+        
+        # Evaluate base expression (tree traversal, populates signal_cache and weight_cache)
         base_result = expr.accept(self)
         
         # Check if expression has assignments (lazy initialization)
@@ -106,8 +140,7 @@ class EvaluateVisitor:
         if assignments:
             # Cache base result for traceability
             base_name = f"{expr.__class__.__name__}_base"
-            self._cache[self._step_counter] = (base_name, base_result)
-            self._step_counter += 1
+            self._cache_signal_and_weights(base_name, base_result)
             
             # Apply assignments sequentially
             final_result = self._apply_assignments(base_result, assignments)
@@ -118,8 +151,7 @@ class EvaluateVisitor:
             
             # Cache final result
             final_name = f"{expr.__class__.__name__}_with_assignments"
-            self._cache[self._step_counter] = (final_name, final_result)
-            self._step_counter += 1
+            self._cache_signal_and_weights(final_name, final_result)
             
             return final_result
         
@@ -216,7 +248,7 @@ class EvaluateVisitor:
         if self._universe_mask is not None:
             result = result.where(self._universe_mask, np.nan)
         
-        self._cache_result(f"Field_{node.name}", result)
+        self._cache_signal_and_weights(f"Field_{node.name}", result)
         return result
     
     def visit_constant(self, node) -> xr.DataArray:
@@ -250,7 +282,7 @@ class EvaluateVisitor:
         # Universe masking is applied by OUTPUT MASKING in visit_operator
         # or by evaluate() after assignments
         
-        self._cache_result(f"Constant_{node.value}", result)
+        self._cache_signal_and_weights(f"Constant_{node.value}", result)
         return result
     
     def visit_operator(self, node) -> xr.DataArray:
@@ -317,7 +349,7 @@ class EvaluateVisitor:
                 result = result.where(self._universe_mask, np.nan)
             
             # 5. Cache
-            self._cache_result("CsQuantile", result)
+            self._cache_signal_and_weights("CsQuantile", result)
             return result
         
         # 1. Traversal: evaluate child/children expressions
@@ -350,29 +382,128 @@ class EvaluateVisitor:
         
         # 4. State collection: cache result with step counter
         operator_name = node.__class__.__name__
-        self._cache_result(operator_name, result)
+        self._cache_signal_and_weights(operator_name, result)
         
         return result
     
-    def _cache_result(self, name: str, result: xr.DataArray):
-        """Cache result with current step number.
+    def _cache_signal_and_weights(self, name: str, signal: xr.DataArray):
+        """Cache signal and compute/cache weights if scaler is present.
         
-        Stores the result in the cache with the current step number as key,
-        then increments the step counter.
+        Stores the signal in _signal_cache. If a scaler is configured,
+        also computes and caches weights in _weight_cache.
         
         Args:
             name: Descriptive name for this step (e.g., 'Field_returns', 'TsMean')
-            result: DataArray result to cache
+            signal: Signal DataArray to cache
         
         Note:
-            Step counter is incremented AFTER caching, so step numbers are
-            0-indexed and match the order of cache insertion.
+            - Signal always cached in _signal_cache
+            - If scaler present: weights computed and cached in _weight_cache
+            - If scaler None: _weight_cache not updated for this step
+            - If scaling fails (e.g., categorical data), None cached for weights
+            - Step counter is incremented AFTER caching
         """
-        self._cache[self._step_counter] = (name, result)
+        # Always cache signal
+        self._signal_cache[self._step_counter] = (name, signal)
+        
+        # Cache weights if scaler present
+        if self._scaler is not None:
+            try:
+                weights = self._scaler.scale(signal)
+                self._weight_cache[self._step_counter] = (name, weights)
+            except Exception as e:
+                # If scaling fails (e.g., categorical data), cache None
+                # This allows mixed step types (some scalable, some not)
+                self._weight_cache[self._step_counter] = (name, None)
+        
         self._step_counter += 1
     
+    def recalculate_weights_with_scaler(self, scaler: 'WeightScaler'):
+        """Recalculate all weights from existing signal cache with new scaler.
+        
+        This enables efficient strategy comparison without re-evaluation.
+        The signal cache remains unchanged (efficient!), only weights
+        are recalculated.
+        
+        Args:
+            scaler: New WeightScaler to apply
+        
+        Note:
+            - Signal cache unchanged (efficient!)
+            - Weight cache completely recalculated
+            - Used when user wants to compare different scaling strategies
+        
+        Example:
+            >>> # Initial evaluation
+            >>> visitor.evaluate(expr, scaler=DollarNeutralScaler())
+            >>> 
+            >>> # Later: swap scaler without re-evaluation
+            >>> visitor.recalculate_weights_with_scaler(GrossNetScaler(2.0, 0.3))
+        """
+        self._scaler = scaler
+        self._weight_cache = {}
+        
+        for step_idx in sorted(self._signal_cache.keys()):
+            name, signal = self._signal_cache[step_idx]
+            
+            try:
+                weights = scaler.scale(signal)
+                self._weight_cache[step_idx] = (name, weights)
+            except Exception:
+                # Scaling failed (e.g., categorical data)
+                self._weight_cache[step_idx] = (name, None)
+    
+    def get_cached_signal(self, step: int) -> Tuple[str, xr.DataArray]:
+        """Retrieve cached signal by step number.
+        
+        Args:
+            step: Step number (0-indexed)
+        
+        Returns:
+            Tuple of (name, signal_DataArray) for the requested step
+        
+        Raises:
+            KeyError: If step number not in cache
+        
+        Example:
+            >>> result = visitor.evaluate(field, scaler=DollarNeutralScaler())
+            >>> name, signal = visitor.get_cached_signal(0)
+            >>> print(name)  # 'Field_returns'
+        """
+        return self._signal_cache[step]
+    
+    def get_cached_weights(self, step: int) -> Tuple[str, Optional[xr.DataArray]]:
+        """Retrieve cached weights by step number.
+        
+        Args:
+            step: Step number (0-indexed)
+        
+        Returns:
+            Tuple of (name, weights_DataArray or None)
+        
+        Raises:
+            KeyError: If step number not in cache
+        
+        Note:
+            weights can be None if:
+            - No scaler was used during evaluation
+            - Scaling failed for this step (e.g., categorical data)
+        
+        Example:
+            >>> result = visitor.evaluate(field, scaler=DollarNeutralScaler())
+            >>> name, weights = visitor.get_cached_weights(0)
+            >>> if weights is not None:
+            ...     print(f"Gross: {abs(weights).sum(dim='asset').mean()}")
+        """
+        if step not in self._weight_cache:
+            return (self._signal_cache[step][0], None)
+        return self._weight_cache[step]
+    
     def get_cached(self, step: int) -> Tuple[str, xr.DataArray]:
-        """Retrieve cached result by step number.
+        """Retrieve cached signal by step number (backward compatibility).
+        
+        This method is maintained for backward compatibility.
+        New code should use get_cached_signal() instead.
         
         Args:
             step: Step number (0-indexed)
@@ -388,6 +519,6 @@ class EvaluateVisitor:
             >>> name, data = visitor.get_cached(0)
             >>> print(name)  # 'Field_returns'
         """
-        return self._cache[step]
+        return self._signal_cache[step]
 
 

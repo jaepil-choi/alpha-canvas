@@ -7,7 +7,7 @@ implementation coordinating all subsystems (Config, DataPanel, Expression, Visit
 
 import pandas as pd
 import xarray as xr
-from typing import Union, Optional
+from typing import Union, Optional, TYPE_CHECKING
 
 from .config import ConfigLoader
 from .data_model import DataPanel
@@ -15,6 +15,9 @@ from .expression import Expression
 from .visitor import EvaluateVisitor
 from .data_loader import DataLoader
 from alpha_canvas.utils import DataAccessor
+
+if TYPE_CHECKING:
+    from alpha_canvas.portfolio.base import WeightScaler
 
 
 class AlphaCanvas:
@@ -304,44 +307,102 @@ class AlphaCanvas:
             if self._universe_mask is not None:
                 self._evaluator._universe_mask = self._universe_mask
     
-    def evaluate(self, expr: Expression) -> xr.DataArray:
-        """Evaluate an Expression and return the result.
+    def evaluate(self, expr: Expression, scaler: Optional['WeightScaler'] = None) -> xr.DataArray:
+        """Evaluate an Expression and return the result (signal).
         
         This is a convenience method that delegates to the internal evaluator,
         providing a cleaner public API without exposing implementation details.
+        
+        **Weight Caching (Dual-Cache):**
+        If scaler is provided, both signal and weights are cached at each step
+        during evaluation. This enables:
+        - Step-by-step portfolio weight tracking for PnL analysis
+        - On-the-fly weight scaler replacement without re-evaluation
+        - Research-friendly comparison of scaling strategies
         
         The result is NOT automatically added to the dataset. Use add_data()
         if you want to store the result.
         
         Args:
             expr: Expression to evaluate
+            scaler: Optional WeightScaler to compute portfolio weights at each step
         
         Returns:
-            xarray.DataArray result of evaluation (with universe masking applied)
+            xarray.DataArray result of evaluation (signal, not weights)
+        
+        Note:
+            - If scaler provided: Both signal and weights cached at each step
+            - Access weights via: rc.get_weights(step) or rc._evaluator.get_cached_weights(step)
+            - If scaler None: Only signals cached, weights cache empty
         
         Example:
-            >>> # Evaluate without storing
+            >>> # Evaluate without weight scaling
             >>> from alpha_canvas.core.expression import Field
             >>> from alpha_canvas.ops.timeseries import TsMean
+            >>> from alpha_canvas.portfolio import DollarNeutralScaler, GrossNetScaler
             >>> 
             >>> result = rc.evaluate(TsMean(Field('returns'), window=5))
-            >>> print(result)  # View result
+            >>> print(result)  # View signal result
+            >>> 
+            >>> # Evaluate with weight scaling
+            >>> result = rc.evaluate(TsMean(Field('returns'), window=5), scaler=DollarNeutralScaler())
+            >>> weights = rc.get_weights(1)  # Get weights for step 1
+            >>> 
+            >>> # Later: swap scaler efficiently
+            >>> result = rc.evaluate(TsMean(Field('returns'), window=5), scaler=GrossNetScaler(2.0, 0.3))
+            >>> # Signal cache reused, only weights recalculated
             >>> 
             >>> # Evaluate and store
             >>> rc.add_data('ma5', TsMean(Field('returns'), window=5))
-            >>> 
-            >>> # Compare to direct evaluator access (not recommended)
-            >>> # result = rc._evaluator.evaluate(expr)  # Don't do this!
-            >>> result = rc.evaluate(expr)  # Do this instead!
         """
-        return self._evaluator.evaluate(expr)
+        return self._evaluator.evaluate(expr, scaler)
+    
+    def get_weights(self, step: int) -> Optional[xr.DataArray]:
+        """Get cached portfolio weights for a specific step.
+        
+        This is a convenience method to retrieve weights from the internal
+        evaluator's weight cache. Weights are only available if the last
+        evaluation included a scaler parameter.
+        
+        Args:
+            step: Step index (0-indexed)
+        
+        Returns:
+            Weights DataArray or None if no scaler was used or if scaling failed
+        
+        Raises:
+            KeyError: If step number not in cache
+        
+        Example:
+            >>> from alpha_canvas.core.expression import Field
+            >>> from alpha_canvas.ops.timeseries import TsMean
+            >>> from alpha_canvas.portfolio import DollarNeutralScaler
+            >>> 
+            >>> # Evaluate with scaler
+            >>> result = rc.evaluate(TsMean(Field('returns'), window=5), scaler=DollarNeutralScaler())
+            >>> 
+            >>> # Get weights for specific step
+            >>> weights_step_1 = rc.get_weights(1)
+            >>> print(weights_step_1.sum(dim='asset'))  # Should be ~0 for dollar-neutral
+            >>> 
+            >>> # Get weights for all steps
+            >>> for step in range(len(rc._evaluator._signal_cache)):
+            ...     weights = rc.get_weights(step)
+            ...     if weights is not None:
+            ...         print(f"Step {step}: Gross = {abs(weights).sum(dim='asset').mean():.2f}")
+        """
+        _, weights = self._evaluator.get_cached_weights(step)
+        return weights
     
     def scale_weights(
         self, 
         signal: Union[Expression, xr.DataArray],
         scaler: 'WeightScaler'
     ) -> xr.DataArray:
-        """Scale signal to portfolio weights using Strategy Pattern.
+        """Scale signal to portfolio weights (direct use, not cached).
+        
+        This method is for one-off weight computation, NOT for step-by-step caching.
+        For step-by-step caching with PnL tracing capability, use: rc.evaluate(expr, scaler=...)
         
         Args:
             signal: Expression or DataArray with signal values
@@ -356,19 +417,27 @@ class AlphaCanvas:
             scaling approaches in research workflows.
         
         Example:
-            >>> from alpha_canvas.portfolio import DollarNeutralScaler
-            >>> signal = ts_mean(Field('returns'), 5)
+            >>> from alpha_canvas.portfolio import DollarNeutralScaler, GrossNetScaler
+            >>> from alpha_canvas.core.expression import Field
+            >>> from alpha_canvas.ops.timeseries import TsMean
+            >>> 
+            >>> # One-off weight computation (not cached)
+            >>> signal = TsMean(Field('returns'), 5)
             >>> scaler = DollarNeutralScaler()
             >>> weights = rc.scale_weights(signal, scaler)
             >>> 
-            >>> # Easy to swap strategies
-            >>> from alpha_canvas.portfolio import GrossNetScaler
+            >>> # Easy to swap strategies (one-off)
             >>> scaler2 = GrossNetScaler(target_gross=2.0, target_net=0.3)
             >>> weights2 = rc.scale_weights(signal, scaler2)
+            >>> 
+            >>> # For step-by-step caching (PnL tracing), use evaluate() instead:
+            >>> result = rc.evaluate(signal, scaler=DollarNeutralScaler())
+            >>> weights_step_0 = rc.get_weights(0)  # Cached!
+            >>> weights_step_1 = rc.get_weights(1)  # Cached!
         """
-        # Evaluate if Expression
+        # Evaluate if Expression (without caching weights)
         if hasattr(signal, 'accept'):
-            signal_data = self.evaluate(signal)
+            signal_data = self.evaluate(signal)  # Note: no scaler here
         else:
             signal_data = signal
         
