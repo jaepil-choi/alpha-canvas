@@ -672,6 +672,262 @@ weights_new = rc.get_weights(2)  # 새로운 weight 조회
    - Weight scaling (스케일링 전략의 영향)
    - 각각의 PnL 기여도 분리 분석
 
+#### Triple-Cache for Backtesting ✅ **IMPLEMENTED**
+
+**Phase 17에서 추가된 기능**: Portfolio return computation이 triple-cache에 통합되었습니다.
+
+**설계 철학**:
+- **Automatic execution**: Scaler 제공 시 백테스트 자동 실행
+- **Position-level returns**: `(T, N)` shape 보존으로 winner/loser 분석 가능
+- **Shift-mask workflow**: Forward-looking bias 방지, NaN pollution 방지
+- **On-demand aggregation**: Daily/cumulative PnL은 필요 시 계산
+
+**Return Data Auto-Loading**:
+
+```python
+# config/data.yaml에 'returns' 필드 필수 정의
+returns:
+  db_type: parquet
+  table: PRICEVOLUME
+  index_col: date
+  security_col: security_id
+  value_col: return
+  query: >
+    SELECT date, security_id, return 
+    FROM read_parquet('data/fake/pricevolume.parquet')
+    WHERE date >= :start_date AND date <= :end_date
+
+# AlphaCanvas 초기화 시 자동 로드
+rc = AlphaCanvas(start_date='2024-01-01', end_date='2024-12-31')
+# 내부적으로 _load_returns_data() 호출
+# rc._returns에 저장, rc._evaluator._returns_data에 전달
+```
+
+**기본 사용법**:
+
+```python
+from alpha_canvas.core.expression import Field
+from alpha_canvas.ops.timeseries import TsMean
+from alpha_canvas.ops.crosssection import Rank
+from alpha_canvas.portfolio.strategies import DollarNeutralScaler
+
+# Step 1: Scaler와 함께 평가 (백테스트 자동 실행)
+expr = Rank(TsMean(Field('price'), window=5))
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+# Step 2: Position-level returns 접근 (winner/loser 분석)
+port_return = rc.get_port_return(step=2)  # (T, N) shape
+total_contrib = port_return.sum(dim='time')
+best_stock = total_contrib.argmax(dim='asset')
+worst_stock = total_contrib.argmin(dim='asset')
+
+print(f"Best performer: {assets[best_stock]}")
+print(f"Worst performer: {assets[worst_stock]}")
+
+# Step 3: Daily PnL 및 성과 지표
+daily_pnl = rc.get_daily_pnl(step=2)  # (T,) aggregated
+mean_pnl = daily_pnl.mean().values
+std_pnl = daily_pnl.std().values
+sharpe = mean_pnl / std_pnl * np.sqrt(252)
+
+print(f"Mean daily PnL: {mean_pnl:.6f}")
+print(f"Sharpe ratio: {sharpe:.2f}")
+
+# Step 4: Cumulative PnL (cumsum 사용)
+cum_pnl = rc.get_cumulative_pnl(step=2)
+final_pnl = cum_pnl.isel(time=-1).values
+
+print(f"Final cumulative PnL: {final_pnl:.6f}")
+```
+
+**Shift-Mask Workflow (Forward-Bias Prevention)**:
+
+```python
+# 내부 구현 (_compute_portfolio_returns):
+def _compute_portfolio_returns(self, weights: xr.DataArray) -> xr.DataArray:
+    # Step 1: Shift weights (어제의 signal로 오늘 거래)
+    weights_shifted = weights.shift(time=1)
+    
+    # Step 2: Re-mask with current universe (중요! NaN pollution 방지)
+    if self._universe_mask is not None:
+        final_weights = weights_shifted.where(self._universe_mask)
+    else:
+        final_weights = weights_shifted
+    
+    # Step 3: Mask returns
+    if self._universe_mask is not None:
+        returns_masked = self._returns_data.where(self._universe_mask)
+    else:
+        returns_masked = self._returns_data
+    
+    # Step 4: Element-wise multiply (shape (T, N) 보존!)
+    port_return = final_weights * returns_masked
+    
+    return port_return  # 즉시 집계하지 않음
+```
+
+**Re-Masking의 중요성**:
+
+```python
+# 문제 상황:
+# - 종목이 universe에서 퇴출 → weight가 NaN
+# - NaN * return = NaN → daily PnL도 NaN (pollution)
+
+# 해결책: Shift 후 현재 universe로 re-mask
+# - 퇴출된 종목의 포지션 청산
+# - NaN pollution 방지
+# - PnL 계산 정상 작동
+
+# Example:
+# t=0: Stock A in universe, weight=0.5
+# t=1: Stock A exits universe
+# Without re-mask: weight[t=1] = 0.5 (shifted) → NaN * return → NaN
+# With re-mask: weight[t=1] = NaN (liquidated) → sum(skipna=True) → valid PnL
+```
+
+**Efficient Scaler Comparison**:
+
+```python
+# 초기 평가
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+pnl1 = rc.get_cumulative_pnl(2).isel(time=-1).values
+
+# Scaler 교체 (Signal 캐시 재사용!)
+result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.5))
+pnl2 = rc.get_cumulative_pnl(2).isel(time=-1).values
+
+print(f"Dollar Neutral PnL: {pnl1:.6f}")
+print(f"Net Long Bias PnL: {pnl2:.6f}")
+
+# 핵심: Signal 재평가 없음, weight와 port_return만 재계산 (효율적!)
+```
+
+**캐시 구조 (Triple-Cache)**:
+
+```python
+class EvaluateVisitor:
+    def __init__(self, ...):
+        # Triple-cache architecture
+        self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}  # 영속적
+        self._weight_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # 갱신 가능
+        self._port_return_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # 갱신 가능 (NEW!)
+        
+        self._returns_data: Optional[xr.DataArray] = None  # Return data (필수)
+        self._scaler: Optional[WeightScaler] = None
+        self._step_counter = 0
+```
+
+**On-Demand Aggregation**:
+
+```python
+# Position-level returns은 항상 (T, N) shape으로 캐싱
+# Daily/cumulative PnL은 필요 시 on-demand 계산 (빠름, <1ms)
+
+def get_daily_pnl(self, step: int) -> Optional[xr.DataArray]:
+    port_return = self.get_port_return(step)
+    if port_return is None:
+        return None
+    # On-demand aggregation
+    daily_pnl = port_return.sum(dim='asset')  # (T,)
+    return daily_pnl
+
+def get_cumulative_pnl(self, step: int) -> Optional[xr.DataArray]:
+    daily_pnl = self.get_daily_pnl(step)
+    if daily_pnl is None:
+        return None
+    # Cumsum (not cumprod) for time-invariance
+    cumulative_pnl = daily_pnl.cumsum(dim='time')
+    return cumulative_pnl
+```
+
+**Cumsum vs Cumprod**:
+
+```python
+# Cumsum: Time-invariant (공정한 전략 비교)
+returns_example = [0.02, 0.03, -0.01]
+cumsum_result = sum(returns_example)  # 0.04 (순서 무관)
+
+# Cumprod: Time-dependent (긴 전략에 유리, 불공정)
+cumprod_result = (1.02 * 1.03 * 0.99) - 1  # 0.0405 (복리 효과)
+
+# 선택: Cumsum을 기본 메트릭으로 사용
+# → 연구 목적의 공정한 비교
+```
+
+**Step-by-Step PnL Decomposition**:
+
+```python
+# 각 연산 step별 PnL 비교 (어느 연산자가 성능에 기여/악화?)
+expr = Rank(TsMean(Field('price'), window=5))
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+for step in range(len(rc._evaluator._signal_cache)):
+    signal_name, _ = rc._evaluator.get_cached_signal(step)
+    cum_pnl = rc.get_cumulative_pnl(step)
+    
+    if cum_pnl is not None:
+        final_pnl = cum_pnl.isel(time=-1).values
+        print(f"Step {step} ({signal_name}): PnL = {final_pnl:+.6f}")
+
+# Example output:
+# Step 0 (Field_price): PnL = -0.101889
+# Step 1 (TsMean): PnL = -0.051532
+# Step 2 (Rank): PnL = -0.054569
+# → TsMean이 성능을 개선했지만, Rank가 약간 악화시킴
+```
+
+**Winner/Loser Attribution Analysis**:
+
+```python
+# Position-level returns을 활용한 기여도 분석
+port_return = rc.get_port_return(final_step)
+
+# 종목별 총 기여도
+total_contrib = port_return.sum(dim='time')
+
+# Top/Bottom 종목 식별
+sorted_contrib = total_contrib.sortby(total_contrib, ascending=False)
+
+print("Top 5 Contributors:")
+for i in range(5):
+    asset = sorted_contrib.asset.values[i]
+    contrib = sorted_contrib.sel(asset=asset).values
+    print(f"  {i+1}. {asset}: {contrib:+.6f}")
+
+print("\nBottom 5 Contributors:")
+for i in range(-5, 0):
+    asset = sorted_contrib.asset.values[i]
+    contrib = sorted_contrib.sel(asset=asset).values
+    print(f"  {i+6}. {asset}: {contrib:+.6f}")
+```
+
+**Performance Impact**:
+
+- **Return loading**: ~5ms per field (같은 Parquet 로드 성능)
+- **Portfolio return computation**: ~7ms for (252, 100) dataset (Experiment 19)
+- **Daily PnL aggregation**: <1ms (on-demand)
+- **Cumulative PnL**: <1ms (on-demand cumsum)
+- **메모리**: 3배 캐시 (signal + weight + port_return), 하지만 position-level 분석 가치 높음
+
+**Design Rationale**:
+
+1. **Position-level caching**: 
+   - Winner/loser 분석을 위해 (T, N) shape 보존 필수
+   - 종목별 기여도, factor 검증에 critical
+   
+2. **On-demand aggregation**:
+   - Daily/cumulative PnL은 빠름 (<1ms)
+   - 캐싱 불필요, 메모리 절약
+   
+3. **Shift-mask workflow**:
+   - Forward-bias 방지 (realistic backtest)
+   - Re-masking으로 NaN pollution 방지
+   
+4. **Triple-cache efficiency**:
+   - Scaler 교체 시 signal 재사용
+   - Weight와 port_return만 재계산
+   - 전략 비교 효율적
+
 ### 3.2.5. 핵심 활용 패턴: 팩터 수익률 계산
 
 #### A. 독립 이중 정렬 (Independent Double Sort) - Fama-French SMB

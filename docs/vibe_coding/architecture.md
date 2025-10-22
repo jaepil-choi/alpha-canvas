@@ -451,7 +451,71 @@ Parquet File (Long Format)
 
 10. **Visitor의 step 카운터 ✅**: `EvaluateVisitor._step_counter` 변수를 유지하며, 각 노드 방문 시 증가시켜 순차적 인덱스를 부여합니다.
 
-11. **미래 PnLTracer 통합**:
+11. **Triple-Cache Backtesting (새로운 기능) ✅**:
+    * **캐시 구조**:
+      - `_signal_cache`: 영구적 (scaler 변경 시에도 유지)
+      - `_weight_cache`: 갱신 가능 (scaler 변경 시 재계산)
+      - `_port_return_cache`: 갱신 가능 (scaler 변경 시 재계산, NEW!)
+    
+    * **자동 백테스트 실행**:
+      - `rc.evaluate(expr, scaler=...)` 호출 시 자동으로 백테스트 실행
+      - 각 step에서 signal, weights, portfolio returns 모두 캐싱
+      - Return 데이터는 초기화 시 자동 로드 (mandatory)
+    
+    * **Shift-Mask 워크플로우** (Forward-Bias 방지):
+      1. 가중치를 1일 shift: `weights_shifted = weights.shift(time=1)`
+      2. 현재 universe로 re-mask: `final_weights = weights_shifted.where(universe)`
+      3. Return을 universe로 mask: `returns_masked = returns.where(universe)`
+      4. Element-wise 곱셈: `port_return = final_weights * returns_masked`
+    
+    * **Position-Level Returns** (Shape 보존):
+      - Portfolio return은 `(T, N)` shape으로 캐싱 (즉시 집계 안 함)
+      - Winner/loser 분석 가능 (어떤 종목이 PnL 기여?)
+      - 온디맨드 집계: `daily_pnl = port_return.sum(dim='asset')`
+    
+    * **API 메서드**:
+      - `rc.get_port_return(step)`: Position-level returns `(T, N)`
+      - `rc.get_daily_pnl(step)`: Daily PnL `(T,)` (온디맨드 집계)
+      - `rc.get_cumulative_pnl(step)`: Cumulative PnL `(T,)` (cumsum 사용)
+
+12. **Triple-Cache 사용 패턴 ✅**:
+    ```python
+    # Return 데이터는 자동 로드 (config/data.yaml의 'returns' 필드)
+    rc = AlphaCanvas(start_date='2024-01-01', end_date='2024-12-31')
+    
+    # Scaler와 함께 평가 (백테스트 자동 실행)
+    result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+    
+    # Position-level returns 접근 (winner/loser 분석)
+    port_return = rc.get_port_return(step=2)  # (T, N) shape
+    total_contrib = port_return.sum(dim='time')
+    best_stock = total_contrib.argmax(dim='asset')
+    worst_stock = total_contrib.argmin(dim='asset')
+    
+    # Daily PnL 및 성과 지표
+    daily_pnl = rc.get_daily_pnl(step=2)  # (T,)
+    sharpe = daily_pnl.mean() / daily_pnl.std() * np.sqrt(252)
+    
+    # Cumulative PnL (cumsum 사용, 시간 불변)
+    cum_pnl = rc.get_cumulative_pnl(step=2)
+    final_pnl = cum_pnl.isel(time=-1).values
+    
+    # Scaler 교체 (효율적! signal 캐시 재사용)
+    result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.5))
+    # signal_cache 변경 없음, weight_cache와 port_return_cache만 재계산
+    ```
+
+13. **Re-Masking의 중요성** (NaN Pollution 방지):
+    * **문제**: 종목이 universe에서 퇴출 → weight가 NaN → `NaN * return = NaN` → PnL이 NaN
+    * **해결책**: Shift 후 현재 universe로 re-mask → 퇴출된 포지션 청산
+    * **검증**: Experiment 19에서 stock exit/entry 시나리오 모두 검증 완료
+
+14. **Cumsum vs Cumprod** (공정한 전략 비교):
+    * **Cumsum**: 시간 불변 (순서와 무관, 공정한 비교)
+    * **Cumprod**: 복리 효과로 시간 의존적 (긴 전략에 유리, 불공정)
+    * **선택**: Cumsum을 기본 메트릭으로 사용 (연구 친화적)
+
+15. **미래 PnLTracer 통합**:
     ```python
     # 미래 API (계획)
     pnl_tracer = PnLTracer(rc._evaluator, returns_data)
