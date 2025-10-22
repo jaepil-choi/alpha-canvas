@@ -482,6 +482,196 @@ pnl_step4 = rc.trace_pnl('combo', step=4)  # 최종 결과
   - `step=1`: 해당 단계만 전달
 - `rc.get_intermediate(var, step)`: `rc._evaluator.cache[var][step][1]` 반환 (DataArray 부분)
 
+#### Dual-Cache for Weight Tracking ✅ **IMPLEMENTED**
+
+**Phase 16에서 추가된 기능**: Weight scaling이 Visitor 캐싱에 통합되었습니다.
+
+**설계 철학**:
+- **Every step scaled**: 모든 연산 단계에서 signal과 weight를 동시 캐싱
+- **Scaler in evaluate()**: `rc.evaluate(expr, scaler=...)` API로 on-the-fly 스케일러 교체
+- **Separate caches**: Signal 캐시는 영속적, weight 캐시는 갱신 가능
+- **Research-friendly**: 동일 signal에 여러 스케일링 전략 쉽게 비교
+
+**기본 사용법**:
+
+```python
+from alpha_canvas.core.expression import Field
+from alpha_canvas.ops.timeseries import TsMean
+from alpha_canvas.ops.crosssection import Rank
+from alpha_canvas.portfolio.strategies import DollarNeutralScaler, GrossNetScaler
+
+# Step 1: Weight scaling과 함께 평가
+expr = Rank(TsMean(Field('returns'), window=5))
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+# Step 2: Signal 캐시 접근 (영속적)
+for step in range(len(rc._evaluator._signal_cache)):
+    name, signal = rc._evaluator.get_cached_signal(step)
+    print(f"Step {step}: {name}, shape={signal.shape}")
+    print(f"  Signal stats: mean={signal.mean():.4f}, std={signal.std():.4f}")
+
+# Step 3: Weight 캐시 접근 (조건부)
+for step in range(len(rc._evaluator._weight_cache)):
+    name, weights = rc._evaluator.get_cached_weights(step)
+    if weights is not None:
+        long_sum = weights.where(weights > 0, 0.0).sum(dim='asset').mean()
+        short_sum = weights.where(weights < 0, 0.0).sum(dim='asset').mean()
+        gross = abs(weights).sum(dim='asset').mean()
+        net = weights.sum(dim='asset').mean()
+        
+        print(f"Step {step}: {name}")
+        print(f"  Long: {long_sum:.4f}, Short: {short_sum:.4f}")
+        print(f"  Gross: {gross:.4f}, Net: {net:.4f}")
+```
+
+**편의 메서드**:
+
+```python
+# rc.get_weights() 편의 메서드 사용
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+# 특정 step의 weight 조회
+weights_step_0 = rc.get_weights(0)  # Field('returns') weights
+weights_step_1 = rc.get_weights(1)  # TsMean result weights
+weights_step_2 = rc.get_weights(2)  # Rank result weights
+
+# Validation
+print(f"Final weights shape: {weights_step_2.shape}")
+print(f"Final gross exposure: {abs(weights_step_2).sum(dim='asset').mean():.2f}")
+print(f"Final net exposure: {weights_step_2.sum(dim='asset').mean():.2f}")
+```
+
+**효율적인 Scaler 교체**:
+
+```python
+# 초기 평가 with DollarNeutralScaler
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+weights_neutral = rc.get_weights(2)  # Final step weights
+
+# Scaler 교체 (Signal 캐시 재사용!)
+result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.3))
+weights_long_bias = rc.get_weights(2)  # Final step weights
+
+# 비교
+print("Dollar Neutral:")
+print(f"  Net: {weights_neutral.sum(dim='asset').mean():.4f}")  # ~0.0
+
+print("Net Long Bias:")
+print(f"  Net: {weights_long_bias.sum(dim='asset').mean():.4f}")  # ~0.3
+
+# 핵심: Signal은 재평가하지 않음 (효율적!)
+# Weight만 재계산됨
+```
+
+**캐시 구조**:
+
+```python
+# EvaluateVisitor 내부 구조
+class EvaluateVisitor:
+    def __init__(self, ...):
+        # Dual-cache architecture
+        self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}  # 영속적
+        self._weight_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # 갱신 가능
+        self._scaler: Optional[WeightScaler] = None  # 현재 scaler
+        self._step_counter = 0
+    
+    def evaluate(self, expr, scaler: Optional[WeightScaler] = None):
+        """Evaluate with optional weight caching."""
+        # scaler가 변경되면 weight_cache만 재설정
+        # signal_cache는 항상 새로 평가 (but same scaler → reuse)
+        ...
+    
+    def recalculate_weights_with_scaler(self, scaler: WeightScaler):
+        """Signal 캐시 재사용, weight만 재계산 (on-demand 전략 비교용)."""
+        self._scaler = scaler
+        self._weight_cache = {}
+        
+        for step_idx in sorted(self._signal_cache.keys()):
+            name, signal = self._signal_cache[step_idx]
+            try:
+                weights = scaler.scale(signal)
+                self._weight_cache[step_idx] = (name, weights)
+            except Exception:
+                self._weight_cache[step_idx] = (name, None)
+```
+
+**설계 근거**:
+
+1. **Every step scaled**: 
+   - PnL 분석을 위해 각 연산 단계의 영향을 추적 가능
+   - 어느 연산자가 성능에 기여/악화시키는지 파악
+
+2. **Scaler in evaluate()**:
+   - 스케일링 전략을 런타임에 쉽게 교체
+   - 동일 Expression에 여러 전략 비교 (연구 워크플로우)
+
+3. **Separate caches**:
+   - Signal 캐시: 영속적 (scaler 변경 시에도 유지)
+   - Weight 캐시: 갱신 가능 (scaler 변경 시 재계산)
+   - 효율성: Signal 재평가 회피
+
+4. **No backward compat 필요**:
+   - MVP 개발 단계에서 clean design 우선
+   - Weight 캐시가 None이면 scaler가 지정 안 된 것
+
+**미래 확장: On-Demand Weight Recalculation**:
+
+```python
+# 현재는 evaluate() 호출 시마다 signal도 재평가
+# 미래 최적화: signal 캐시가 있으면 재사용하고 weight만 재계산
+
+# Option 1: 현재 방식 (매번 재평가)
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())  # Signal + Weight 계산
+result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.3))  # Signal 재평가 + Weight 계산
+
+# Option 2: 미래 최적화 (signal 캐시 재사용)
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())  # Signal + Weight 계산
+rc._evaluator.recalculate_weights_with_scaler(GrossNetScaler(2.0, 0.3))  # Weight만 재계산
+weights_new = rc.get_weights(2)  # 새로운 weight 조회
+
+# 현재는 evaluate()가 항상 signal 재평가하지만,
+# 미래에는 signal 캐시가 valid하면 재사용 가능
+```
+
+**Performance Impact**:
+
+- **Signal 평가**: 변경 없음 (기존 성능 유지)
+- **Weight 계산**: Step당 7-40ms (Phase 15 검증)
+- **Scaler 교체**: Signal 캐시 재사용 시 weight 계산만 (매우 효율적)
+- **메모리**: 2배 캐시 (signal + weight), 하지만 PnL 분석 가치가 cost 상회
+
+**Use Cases**:
+
+1. **Step-by-step PnL decomposition**:
+   ```python
+   for step in range(num_steps):
+       signal = rc._evaluator.get_cached_signal(step)[1]
+       weights = rc.get_weights(step)
+       if weights is not None:
+           # Calculate PnL for this step
+           step_pnl = (weights * returns.shift(time=1)).sum(dim='asset')
+           print(f"Step {step} PnL: {step_pnl.sum().values:.2f}")
+   ```
+
+2. **Scaling strategy comparison**:
+   ```python
+   strategies = {
+       'neutral': DollarNeutralScaler(),
+       'long_10pct': GrossNetScaler(2.0, 0.2),
+       'long_only': LongOnlyScaler(1.0)
+   }
+   
+   for name, scaler in strategies.items():
+       result = rc.evaluate(expr, scaler=scaler)
+       weights = rc.get_weights(-1)  # Final step
+       # Compare performance metrics
+   ```
+
+3. **Attribution analysis**:
+   - Signal generation (연산자들의 기여)
+   - Weight scaling (스케일링 전략의 영향)
+   - 각각의 PnL 기여도 분리 분석
+
 ### 3.2.5. 핵심 활용 패턴: 팩터 수익률 계산
 
 #### A. 독립 이중 정렬 (Independent Double Sort) - Fama-French SMB

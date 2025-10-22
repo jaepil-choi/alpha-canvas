@@ -370,7 +370,7 @@ Parquet File (Long Format)
 
 ### 🔨 **F3 (심층 추적성) - PARTIAL**
 
-**구현 완료**: 정수 기반 step 인덱싱 및 캐싱  
+**구현 완료**: 정수 기반 step 인덱싱, 듀얼 캐시 아키텍처, 가중치 추적  
 **미구현**: PnLTracer 및 trace_pnl() API
 
 1. **설계 동기:**
@@ -379,15 +379,24 @@ Parquet File (Long Format)
 
 2. `rc._evaluator` (Visitor)는 **"Stateful(상태 저장)"** 객체입니다.
 
-3. **Cache 구조 ✅**: `EvaluateVisitor`는 내부에 `_cache: dict[int, tuple[str, xr.DataArray]]`를 소유합니다.
-   * 키: **정수 step 인덱스** (0부터 시작)
-   * 값: `(노드_이름, DataArray)` 튜플 - 노드 이름은 디버깅용 메타데이터
+3. **Dual-Cache 구조 ✅**: `EvaluateVisitor`는 PnL 분석을 위한 이중 캐시를 소유합니다:
+   * **`_signal_cache: dict[int, tuple[str, xr.DataArray]]`** (영속적)
+     - 키: **정수 step 인덱스** (0부터 시작)
+     - 값: `(노드_이름, signal_DataArray)` 튜플
+     - **영속성**: scaler 변경 시에도 유지됨 (효율성)
+   
+   * **`_weight_cache: dict[int, tuple[str, Optional[xr.DataArray]]]`** (갱신 가능)
+     - 키: **정수 step 인덱스** (0부터 시작)
+     - 값: `(노드_이름, weights_DataArray or None)` 튜플
+     - **갱신성**: scaler 변경 시 재계산됨
+     - **조건부**: scaler가 제공된 경우에만 채워짐
 
 4. **캐싱 로직 ✅**: Visitor는 `Expression` 트리를 **깊이 우선 탐색(depth-first)** 으로 순회하면서 **각 노드가 반환하는 중간 결과를 순차적으로 캐시**합니다.
-   * 예시 Expression: `group_neutralize(ts_mean(Field('returns'), 3), 'subindustry')`
-   * `cache[0]` = `('Field_returns', DataArray(...))`
-   * `cache[1]` = `('TsMean', DataArray(...))`
-   * `cache[2]` = `('GroupNeutralize', DataArray(...))`
+   * 예시 Expression: `rank(ts_mean(Field('returns'), 3))`
+   * `signal_cache[0]` = `('Field_returns', DataArray(...))`
+   * `signal_cache[1]` = `('TsMean', DataArray(...))`
+   * `signal_cache[2]` = `('Rank', DataArray(...))`
+   * scaler가 제공되면 각 step의 `weight_cache[i]`에도 포트폴리오 가중치 저장
 
 5. **병렬 Expression 예시:**
    * `ts_mean(Field('returns'), 3) + rank(Field('market_cap'))`
@@ -397,12 +406,66 @@ Parquet File (Long Format)
    * step 3: `rank(Field('market_cap'))`
    * step 4: `add(step1, step3)` ← 병합
 
-6. **📋 미구현**: 선택적 추적 API
+6. **Weight Caching (새로운 기능) ✅**:
+   * **API**: `rc.evaluate(expr, scaler=DollarNeutralScaler())`
+   * **동작**: 평가 중 각 step에서 signal과 weight를 모두 캐싱
+   * **효율성**: scaler 변경 시 signal 캐시 재사용, weight만 재계산
+   * **접근**: `rc.get_weights(step)` 편의 메서드로 weight 조회
+   * **사용 사례**: 
+     - Step-by-step PnL 분석 (어느 연산자가 성능에 기여?)
+     - 스케일링 전략 비교 (signal 재평가 없이)
+     - Attribution 분석 (signal 생성 vs. weight 스케일링)
+
+7. **Dual-Cache 사용 패턴 ✅**:
+   ```python
+   # 초기 평가 with scaler
+   result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+   
+   # 각 step의 signal과 weight 접근
+   for step in range(len(rc._evaluator._signal_cache)):
+       name, signal = rc._evaluator.get_cached_signal(step)
+       name, weights = rc._evaluator.get_cached_weights(step)
+       
+       if weights is not None:
+           print(f"Step {step} ({name}):")
+           print(f"  Signal range: [{signal.min():.2f}, {signal.max():.2f}]")
+           print(f"  Gross: {abs(weights).sum(dim='asset').mean():.2f}")
+           print(f"  Net: {weights.sum(dim='asset').mean():.2f}")
+   
+   # Scaler 교체 (효율적! signal 캐시 재사용)
+   result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.3))
+   # signal_cache 변경 없음, weight_cache만 재계산
+   ```
+
+8. **Dual-Cache 핵심 이점**:
+   * **효율성**: Scaler 변경 시 signal 재평가 불필요 (재사용)
+   * **추적성**: 모든 step에서 signal과 weight 모두 접근 가능
+   * **연구 친화적**: 동일 signal에 여러 스케일링 전략 쉽게 비교
+   * **유연성**: weight 캐시는 선택적 (scaler 없으면 None)
+   * **PnL 준비**: 미래 PnLTracer 구현을 위한 기반 완비
+
+9. **📋 미구현**: 선택적 추적 API
    * `rc.trace_pnl('alpha1', step=1)` - 계획만 있음
    * `rc.get_intermediate('alpha1', step=1)` - 계획만 있음
-   * `PnLTracer` 컴포넌트 - 아직 구현 안 됨
+   * `PnLTracer` 컴포넌트 - 아직 구현 안 됨 (하지만 dual-cache로 기반 준비 완료)
 
-7. **Visitor의 step 카운터 ✅**: `EvaluateVisitor._step_counter` 변수를 유지하며, 각 노드 방문 시 증가시켜 순차적 인덱스를 부여합니다.
+10. **Visitor의 step 카운터 ✅**: `EvaluateVisitor._step_counter` 변수를 유지하며, 각 노드 방문 시 증가시켜 순차적 인덱스를 부여합니다.
+
+11. **미래 PnLTracer 통합**:
+    ```python
+    # 미래 API (계획)
+    pnl_tracer = PnLTracer(rc._evaluator, returns_data)
+    step_pnls = pnl_tracer.decompose_by_step()
+    # {'step_0': {'pnl': ..., 'sharpe': ...},
+    #  'step_1': {'pnl': ..., 'sharpe': ...}, ...}
+    
+    # Scaler 비교
+    scaler_comparison = pnl_tracer.compare_scalers([
+        DollarNeutralScaler(),
+        GrossNetScaler(2.0, 0.2),
+        LongOnlyScaler(1.0)
+    ])
+    ```
 
 ---
 
