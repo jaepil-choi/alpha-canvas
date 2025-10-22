@@ -2180,3 +2180,204 @@ def scale_grossnet(signal: xr.DataArray, target_gross: float, target_net: float)
 7. **TODO**: Update documentation (PRD, Architecture, Implementation)
 
 ---
+
+## Phase 17: Backtesting with Portfolio Returns (F6)
+
+### Experiment 19: Vectorized Backtesting with Position-Level Attribution
+
+**Date**: 2025-01-22  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated vectorized backtest workflow with shift-mask-multiply pattern. Position-level returns `(T, N)` preserved for winner/loser attribution. Re-masking after shift prevents NaN pollution. Cumsum validated as time-invariant metric (preferred over cumprod). Performance excellent at 7ms for (252, 100) dataset.
+
+#### Key Discoveries
+
+1. **Position-Level Returns Preserve Attribution**
+   - **Pattern**: `port_return = final_weights * returns` (element-wise, shape `(T, N)`)
+   - **Benefit**: Can trace which stocks contributed to PnL (winners/losers)
+   - **Critical**: Do NOT aggregate immediately - keep `(T, N)` shape for traceability
+   - **Aggregate on-demand**: `daily_pnl = port_return.sum(dim='asset')` only when needed
+
+2. **Shift-Mask Workflow (Forward-Looking Bias Prevention)**
+   - **Step 1**: Generate weights from signal at time `t-1` using `universe[t-1]`
+   - **Step 2**: Shift weights: `weights_shifted = weights.shift(time=1)` 
+   - **Step 3**: **RE-MASK** with universe at time `t`: `final_weights = weights_shifted.where(universe[t])`
+   - **Step 4**: Calculate returns: `port_return = final_weights * returns[t]`
+   - **Critical**: Re-masking liquidates positions that exited universe (prevents NaN pollution)
+
+3. **Re-Masking Prevents NaN Pollution**
+   - **Problem**: Stock exits universe → weight becomes NaN → `NaN * return = NaN` → daily PnL is NaN
+   - **Solution**: Re-mask shifted weights with current universe → exited stocks get NaN weight → `NaN * return = 0` in sum (via `skipna=True`)
+   - **Validation**: Stock exit scenario passed - PnL remains valid (no NaN pollution)
+   - **Entry scenario**: Stock enters universe at `t` but has NaN weight (correctly can't hold it from `t-1`)
+
+4. **Cumsum vs Cumprod (Time-Invariance)**
+   - **Cumsum**: `[0.02, 0.03, -0.01] → cumsum = 0.04` (time-invariant)
+   - **Cumprod**: `[0.02, 0.03, -0.01] → cumprod = 0.0405` (compound effect, time-dependent)
+   - **Decision**: Use cumsum for fair strategy comparison
+   - **Rationale**: Order doesn't affect cumsum, but cumprod favors longer strategies (unfair)
+   - **Implementation**: `cumulative_pnl = daily_pnl.cumsum(dim='time')` calculated on-demand
+
+5. **Winner/Loser Attribution**
+   - **Pattern**: `total_contrib = port_return.sum(dim='time')` → contribution per stock
+   - **Benefit**: Identify which stocks drove PnL (both positive and negative)
+   - **Use case**: Post-mortem analysis, factor validation, position sizing insights
+   - **Performance**: Instant (vectorized sum operation)
+
+6. **Performance Metrics**
+   - **Dataset**: (252, 100) - 1 year daily, 100 stocks
+   - **Time**: 7ms total (shift + re-mask + multiply + sum + cumsum)
+   - **Target**: <10ms (passed with 30% margin)
+   - **Conclusion**: Fully vectorized workflow is production-ready
+
+#### Implementation Pattern
+
+**Vectorized Backtest Workflow**:
+
+```python
+def compute_portfolio_returns(
+    weights: xr.DataArray,        # (T, N) from weight scaler
+    returns: xr.DataArray,         # (T, N) from data
+    universe: xr.DataArray         # (T, N) boolean mask
+) -> xr.DataArray:
+    """
+    Compute position-level portfolio returns with forward-bias prevention.
+    
+    Returns:
+        (T, N) DataArray - position-level weighted returns (for attribution)
+    """
+    # Step 1: Shift weights (trade on yesterday's signal)
+    weights_shifted = weights.shift(time=1)
+    
+    # Step 2: Re-mask with today's universe (liquidate exited positions)
+    final_weights = weights_shifted.where(universe)
+    
+    # Step 3: Mask returns
+    returns_masked = returns.where(universe)
+    
+    # Step 4: Element-wise multiply (KEEP (T, N) SHAPE!)
+    port_return = final_weights * returns_masked
+    
+    return port_return  # NOT aggregated yet!
+
+# On-demand aggregation (when user needs it):
+daily_pnl = port_return.sum(dim='asset')        # (T,)
+cumulative_pnl = daily_pnl.cumsum(dim='time')   # (T,)
+```
+
+**Cache Structure**:
+
+```python
+# In EvaluateVisitor:
+self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}      # Persistent
+self._weight_cache: Dict[int, Tuple[str, xr.DataArray]] = {}      # Renewable (when scaler changes)
+self._port_return_cache: Dict[int, Tuple[str, xr.DataArray]] = {} # Renewable (when scaler changes)
+
+# At each step:
+self._signal_cache[step] = (name, signal)           # (T, N)
+self._weight_cache[step] = (name, weights)          # (T, N)
+self._port_return_cache[step] = (name, port_return) # (T, N) - position-level!
+```
+
+#### Test Scenarios Validated
+
+**Scenario 1: Basic Attribution** ✅
+- Position-level returns preserve `(T, N)` shape
+- Winner/loser analysis works (stock contributions visible)
+- Aggregate PnL calculated correctly on-demand
+
+**Scenario 2: Stock Exit** ✅
+- Stock exits universe mid-period
+- Re-masking prevents NaN pollution in PnL
+- Exited stock contribution correctly zeroed
+
+**Scenario 3: Stock Entry** ✅
+- Stock enters universe mid-period
+- Entry day has NaN weight (can't trade from yesterday)
+- Subsequent days have valid weights
+
+**Scenario 4: Performance (252×100)** ✅
+- Completed in 7ms (well under 10ms target)
+- All steps fully vectorized
+- Scalable to production datasets
+
+**Scenario 5: Attribution at Scale** ✅
+- Top/bottom contributor analysis works on large dataset
+- Sorting and filtering performant
+- Winner/loser identification instantaneous
+
+**Scenario 6: Cumsum Validation** ✅
+- Cumsum is time-invariant (fair for comparison)
+- Cumprod is time-dependent (compound effect)
+- Cumsum chosen as default metric
+
+#### Design Decisions
+
+1. **Return Data is Mandatory**
+   - AlphaCanvas initialization must load 'returns' field from config
+   - Fail fast if 'returns' field missing (don't allow backtest-less sessions)
+   - Hardcoded field name: `'returns'`
+
+2. **Automatic Backtest Execution**
+   - When `rc.evaluate(expr, scaler=...)` called with scaler:
+     - Signal computed and cached
+     - Weights computed and cached
+     - **Portfolio returns automatically computed and cached**
+   - When no scaler: Only signal cached (no weights, no portfolio returns)
+
+3. **Triple-Cache Architecture**
+   - `_signal_cache`: Persistent (never changes across scaler swaps)
+   - `_weight_cache`: Renewable (recalculated when scaler changes)
+   - `_port_return_cache`: Renewable (recalculated when scaler changes or returns change)
+   - All three caches reset when `evaluate()` called
+
+4. **Shape Preservation for Attribution**
+   - Cache `port_return` as `(T, N)` - NEVER aggregate in cache
+   - User aggregates on-demand: `rc.get_port_return(step).sum(dim='asset')`
+   - Enables post-mortem winner/loser analysis
+
+5. **On-Demand Aggregation**
+   - `daily_pnl = port_return.sum(dim='asset')` - not cached
+   - `cumulative_pnl = daily_pnl.cumsum(dim='time')` - not cached
+   - Both are fast operations (<1ms), no need to cache
+
+#### Lessons Learned
+
+1. **Re-Masking is Critical**
+   - Shift alone is not enough (creates NaN pollution)
+   - Must re-mask with current universe after shift
+   - This liquidates exited positions correctly
+
+2. **Position-Level Attribution Requires (T, N) Shape**
+   - Don't aggregate too early
+   - Keep element-wise returns for traceability
+   - Aggregate only when user requests it
+
+3. **Cumsum > Cumprod for Research**
+   - Time-invariance ensures fair comparison
+   - Compound interest unfairly favors longer strategies
+   - Simple sum is more interpretable
+
+4. **Vectorization is Key**
+   - 7ms for 25,200 data points (252×100)
+   - No Python loops (pure xarray operations)
+   - Scales to production datasets
+
+5. **Forward-Bias Prevention via Shift**
+   - `.shift(time=1)` ensures we trade on yesterday's signal
+   - Today's return mapped to yesterday's weights
+   - Critical for realistic backtest results
+
+#### Next Steps
+
+1. ✅ Experiment validated shift-mask-multiply workflow
+2. ✅ Document findings in FINDINGS.md (this entry)
+3. **TODO**: Implement return data auto-loading in AlphaCanvas.__init__
+4. **TODO**: Add _port_return_cache to EvaluateVisitor (triple-cache)
+5. **TODO**: Implement backtest logic in Visitor._cache_signal_and_weights
+6. **TODO**: Add convenience methods: rc.get_port_return(), rc.get_daily_pnl(), rc.get_cumulative_pnl()
+7. **TODO**: Create comprehensive tests for backtest module
+8. **TODO**: Create showcase demonstrating backtest and attribution
+9. **TODO**: Update documentation (PRD, Architecture, Implementation)
+
+---
