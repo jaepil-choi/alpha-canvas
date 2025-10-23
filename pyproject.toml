@@ -11,11 +11,18 @@ dependencies = [
     "pytest (>=8.4.2,<9.0.0)",
     "pyyaml (>=6.0.3,<7.0.0)",
     "pandas (>=2.3.3,<3.0.0)",
-    "xarray (>=2025.10.1,<2026.0.0)"
+    "xarray (>=2025.10.1,<2026.0.0)",
+    "duckdb (>=1.4.1,<2.0.0)",
+    "pyarrow (>=21.0.0,<22.0.0)",
+    "scipy (>=1.16.2,<2.0.0)",
 ]
 
 [tool.poetry]
-packages = [{include = "alpha_canvas", from = "src"}]
+packages = [
+    {include = "alpha_canvas", from = "src"},
+    {include = "alpha_database", from = "src"},
+    {include = "alpha_lab", from = "src"},
+]
 
 
 [build-system]

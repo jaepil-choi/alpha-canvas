@@ -2,6 +2,86 @@
 
 PRD의 요구사항(F1, F2, F3)을 구현하기 위해 **퍼사드(Facade)**, **컴포짓(Composite)**, **비지터(Visitor)** 디자인 패턴을 기반으로 시스템을 설계합니다.
 
+## 2.0. 시스템 개요
+
+### 2.0.1. 컴포넌트 다이어그램
+
+```mermaid
+graph TB
+    User[User/Researcher]
+    
+    subgraph "AlphaCanvas Facade"
+        RC[rc: AlphaCanvas]
+        DB[(db: xr.Dataset)]
+        Rules[rules: dict]
+    end
+    
+    subgraph "Execution Layer"
+        Visitor[EvaluateVisitor]
+        Cache[Step Cache]
+        UnivMask[Universe Mask]
+    end
+    
+    subgraph "Expression Tree"
+        Field[Field Nodes]
+        Operators[Operator Nodes]
+        ExprTree[Expression Tree]
+    end
+    
+    subgraph "Data Layer"
+        Config[ConfigLoader]
+        DataLoader[DataLoader]
+        Parquet[(Parquet Files)]
+    end
+    
+    subgraph "Portfolio Layer"
+        Scalers[Weight Scalers]
+        Strategies[Scaling Strategies]
+    end
+    
+    User -->|initialize| RC
+    User -->|add_data| RC
+    User -->|scale_weights| RC
+    RC -->|stores| DB
+    RC -->|registers| Rules
+    RC -->|owns| Visitor
+    RC -->|delegates| Scalers
+    
+    Visitor -->|applies| UnivMask
+    Visitor -->|caches| Cache
+    Visitor -->|traverses| ExprTree
+    
+    ExprTree -->|contains| Field
+    ExprTree -->|contains| Operators
+    
+    Visitor -->|uses| DataLoader
+    DataLoader -->|reads| Config
+    DataLoader -->|queries| Parquet
+    
+    Scalers -->|uses| Strategies
+    Operators -->|compute| Operators
+```
+
+### 2.0.2. 데이터 흐름 다이어그램
+
+```mermaid
+flowchart LR
+    A[Parquet Files] -->|SQL Query| B[DataLoader]
+    B -->|Long→Wide| C[xarray.DataArray]
+    C -->|INPUT MASK| D[Visitor Cache]
+    
+    E[Expression Tree] -->|Traversal| F[Visitor]
+    F -->|Delegation| G[Operator.compute]
+    G -->|Result| F
+    F -->|OUTPUT MASK| D
+    
+    D -->|Cached Data| H[AlphaCanvas.db]
+    H -->|Access| I[User]
+    
+    J[Universe Mask] -.->|Applied at| C
+    J -.->|Applied at| F
+```
+
 ## 2.1. 핵심 컴포넌트
 
 * **A. `AlphaCanvas` (`rc` 객체): 퍼사드 (Facade) 🏛️**
@@ -25,8 +105,31 @@ PRD의 요구사항(F1, F2, F3)을 구현하기 위해 **퍼사드(Facade)**, **
 
 * **C. `Visitor` 패턴: 실행 및 추적 (Visitor) 👨‍🍳**
 
-  * **역할:** `Expression` 트리(레시피)를 "방문(visit)"하며 실제 작업을 수행하는 "실행자"입니다. **`Expression` 객체와는 완전히 분리된 별개의 클래스**입니다.
-  * **`EvaluateVisitor`:** `rc` 객체(`rc._evaluator`)가 소유하며, `Expression` 트리를 순회하며 `rc.db`의 데이터를 참조하여 실제 `xarray.DataArray`를 계산합니다.
+  * **역할:** `Expression` 트리(레시피)를 "방문(visit)"하며 **트리 순회 및 상태 수집**을 담당합니다. **`Expression` 객체와는 완전히 분리된 별개의 클래스**입니다.
+  * **`EvaluateVisitor`:** `rc` 객체(`rc._evaluator`)가 소유하며, `Expression` 트리를 순회하며 다음을 수행합니다:
+    1. **트리 순회(Traversal):** 깊이 우선 탐색으로 자식 노드를 먼저 방문
+    2. **계산 위임(Delegation):** 각 연산자의 `compute()` 메서드를 호출하여 실제 계산 수행
+    3. **유니버스 적용(Universe Application):** 필드 입력과 연산자 출력에 유니버스 마스킹 적용
+    4. **상태 수집(State Collection):** 중간 결과를 정수 스텝 인덱스와 함께 캐시에 저장
+  * **중요:** Visitor는 **계산 로직을 포함하지 않습니다**. 계산 로직은 각 연산자(`Expression`)가 소유합니다.
+  * **제네릭 패턴:** 모든 연산자는 단일 `visit_operator()` 메서드를 통해 처리됩니다 (연산자별 개별 메서드 불필요).
+    - `visit_field()`: Field 노드 전용 (데이터 로딩 + INPUT MASKING)
+    - `visit_operator()`: 모든 연산자 공통 (순회 + 위임 + OUTPUT MASKING + 캐싱)
+
+* **D. 연산자 책임 분리 (Operator Responsibility)**
+
+  * **설계 원칙:** 각 연산자(`Expression`)는 자신의 계산 로직을 `compute()` 메서드로 캡슐화합니다.
+  * **Visitor의 역할:**
+    * ❌ **하지 않는 것:** 연산자별 계산 로직 구현 (예: rolling window 계산)
+    * ✅ **하는 것:** 트리 순회, 계산 위임, 결과 캐싱
+  * **연산자의 역할:**
+    * ✅ **하는 것:** 자신의 핵심 계산 로직 구현 (`compute()` 메서드)
+    * ✅ **하는 것:** Visitor 인터페이스 제공 (`accept()` 메서드)
+  * **이점:**
+    1. **단일 책임 원칙(SRP):** Visitor는 순회만, 연산자는 계산만
+    2. **테스트 용이성:** `compute()` 메서드를 독립적으로 테스트 가능
+    3. **유지보수성:** Visitor가 연산자 증가에 따라 비대해지지 않음
+    4. **확장성:** 새 연산자 추가 시 Visitor 수정 최소화
 
 ## 2.2. 데이터 모델 아키텍처 (Data Model Architecture)
 
@@ -34,24 +137,199 @@ PRD의 요구사항(F1, F2, F3)을 구현하기 위해 **퍼사드(Facade)**, **
 
 * `DataPanel`은 `alpha-canvas`의 핵심 데이터 모델이며, 그 실체는 `xarray.Dataset` 객체입니다.
 * **좌표(Coordinates):** 모든 데이터는 `(time, asset)` 좌표를 공유합니다.
-* **데이터 변수(Data Variables):** 
-  - `rc.add_data(name, expr)` 메서드는 `rc._evaluator`(Visitor)를 호출하여 `expr`를 평가하고, 그 결과 `(T, N) DataArray`를 `rc.db.assign({name: result_array})`를 통해 `data_vars`에 **새로운 데이터 변수(Data Variable)로 추가**합니다.
-  - 예: `rc.add_data('size', cs_quantile(...))`는 `rc.db['size']`를 생성하며, 이는 `string` 타입의 레이블 배열입니다.
+* **데이터 변수(Data Variables):**
+  * `rc.add_data(name, expr)` 메서드는 `rc._evaluator`(Visitor)를 호출하여 `expr`를 평가하고, 그 결과 `(T, N) DataArray`를 `rc.db.assign({name: result_array})`를 통해 `data_vars`에 **새로운 데이터 변수(Data Variable)로 추가**합니다.
+  * 예: `rc.add_data('size', cs_quantile(...))`는 `rc.db['size']`를 생성하며, 이는 `string` 타입의 레이블 배열입니다.
 
 ### B. "개방형 툴킷" (Open Toolkit) 구현
 
 * **Eject (꺼내기):**
-  - `rc` 객체는 `db` 프로퍼티(e.g., `@property def db`)를 제공하여, `rc.db` 호출 시 래핑된 `xarray.Dataset` 객체를 **순수(pure) `xarray.Dataset` 타입**으로 반환해야 합니다.
-  - 이를 통해 사용자는 Jupyter에서 `scipy`, `statsmodels` 등 외부 라이브러리로 자유롭게 데이터를 조작할 수 있습니다.
+  * `rc` 객체는 `db` 프로퍼티(e.g., `@property def db`)를 제공하여, `rc.db` 호출 시 래핑된 `xarray.Dataset` 객체를 **순수(pure) `xarray.Dataset` 타입**으로 반환해야 합니다.
+  * 이를 통해 사용자는 Jupyter에서 `scipy`, `statsmodels` 등 외부 라이브러리로 자유롭게 데이터를 조작할 수 있습니다.
 
 * **Inject (주입하기):**
-  - `rc.add_data(name, data)` 메서드는 `Expression` 객체뿐만 아니라, 외부에서 생성된 `xarray.DataArray`도 `data` 인자로 받아 `rc.db`에 "주입(inject)"할 수 있도록 오버로딩되어야 합니다.
-  - 예: `rc.add_data('beta', beta_array)` (beta_array는 외부에서 scipy로 계산한 DataArray)
+  * `rc.add_data(name, data)` 메서드는 `Expression` 객체뿐만 아니라, 외부에서 생성된 `xarray.DataArray`도 `data` 인자로 받아 `rc.db`에 "주입(inject)"할 수 있도록 오버로딩되어야 합니다.
+  * 예: `rc.add_data('beta', beta_array)` (beta_array는 외부에서 scipy로 계산한 DataArray)
 
-### C. 유니버스 마스킹 (Universe Masking)
+### C. 유니버스 마스킹 (Universe Masking) ✅ **IMPLEMENTED**
 
-* `DataPanel` 모델은 `(T, N)` 유니버스 마스크를 `where()`를 통해 모든 연산의 입력과 출력에 일관되게 적용하는 로직을 내장해야 합니다.
-* 이를 통해 "투자 가능 유니버스(investable universe)" 개념을 시스템 전반에 일관되게 적용합니다.
+**투자 가능 유니버스(Investable Universe)**는 alpha-canvas의 핵심 설계 원칙입니다. 모든 데이터와 연산 결과는 정의된 유니버스를 자동으로 준수합니다.
+
+#### 1. 설계 철학: 이중 마스킹 전략 (Double Masking Strategy)
+
+**핵심 원칙**: 신뢰 체인(Trust Chain)을 구축하여 모든 데이터가 유니버스를 준수함을 보장합니다.
+
+* **INPUT MASKING (입력 마스킹)**: `visit_field()`에서 필드 검색 시 적용
+  - 원본 데이터가 시스템에 진입하는 순간 마스킹
+  - `result = result.where(universe_mask, np.nan)`
+  
+* **OUTPUT MASKING (출력 마스킹)**: `visit_operator()`에서 연산 결과에 적용
+  - 모든 연산자의 출력이 유니버스를 준수함을 보장
+  - 연산자는 입력이 이미 마스킹되었다고 신뢰 가능
+
+#### 2. 불변성 (Immutability)
+
+* **초기화 시 설정**: `AlphaCanvas(universe=...)`로 세션 시작 시 한 번만 설정
+* **변경 불가**: 한번 설정된 유니버스는 변경 불가 (read-only property로만 접근)
+* **근거**: 공정한 PnL 단계별 비교를 위해 고정된 유니버스 필요
+  - alpha_t와 alpha_{t+1}를 비교할 때 유니버스가 바뀌면 비교 불가능
+  - 재현 가능한 백테스트 보장
+
+#### 3. 아키텍처 흐름도
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant AlphaCanvas
+    participant Visitor
+    participant Field
+    participant Operator
+    
+    User->>AlphaCanvas: initialize(universe=mask)
+    AlphaCanvas->>AlphaCanvas: validate & store universe
+    AlphaCanvas->>Visitor: propagate universe_mask
+    
+    User->>AlphaCanvas: add_data('returns', Field(...))
+    AlphaCanvas->>Visitor: evaluate(Expression)
+    Visitor->>Field: visit_field()
+    Field->>Visitor: raw data
+    Visitor->>Visitor: apply INPUT MASKING (where)
+    Visitor->>Visitor: cache masked data
+    
+    User->>AlphaCanvas: add_data('ma', TsMean(...))
+    AlphaCanvas->>Visitor: evaluate(TsMean)
+    Visitor->>Field: visit_field() [cached]
+    Visitor->>Operator: visit_operator()
+    Operator->>Operator: compute() [core logic]
+    Operator->>Visitor: result
+    Visitor->>Visitor: apply OUTPUT MASKING (where)
+    Visitor->>Visitor: cache masked result
+    Visitor->>AlphaCanvas: final result
+```
+
+#### 4. 멱등성 (Idempotency)
+
+* **검증됨**: 이중 마스킹은 멱등성을 가짐 (데이터 손상 없음)
+* `data.where(mask, np.nan).where(mask, np.nan) == data.where(mask, np.nan)`
+* 마스킹된 데이터는 재마스킹되어도 변하지 않음
+
+#### 5. 성능 특성
+
+* **오버헤드**: 13.6% (실측값, 500×100 데이터셋 기준)
+* **결론**: xarray의 lazy evaluation 덕분에 무시 가능한 수준
+* **최적화**: 이중 마스킹의 안전성 이득이 성능 비용보다 훨씬 큼
+
+#### 6. Open Toolkit 통합
+
+* **주입된 데이터도 마스킹**: `add_data(name, DataArray)` 시 자동 적용
+* **Eject-Inject 패턴**: 외부에서 계산한 데이터도 유니버스 준수
+
+#### 7. 미래 확장
+
+* **데이터베이스 기반 유니버스**: `AlphaCanvas(universe=Field('univ500'))`
+  - Parquet 파일에서 유니버스 로드: `date, security_id, univ100, univ200, univ500, univ1000`
+  - Expression 평가 메커니즘 그대로 활용
+  - 코드 변경 불필요
+
+* **유니버스 생성 유틸리티**: 복잡한 조건의 유니버스 생성 및 영속화
+  - `create_universe(price > 5, volume > 100000, market_cap > 1e9)`
+  - 데이터베이스에 저장하여 재사용
+
+### D. 데이터 로딩 아키텍처 (Data Loading Architecture) ✅ **IMPLEMENTED**
+
+**DataLoader 컴포넌트**는 Parquet 파일 기반 데이터 검색을 담당합니다.
+
+#### 1. 설계 목표
+
+* **파일 기반 DB**: MVP에서는 Parquet 파일을 DB로 활용
+* **SQL 기반 쿼리**: DuckDB를 사용하여 Parquet에 직접 SQL 실행
+* **동적 파라미터**: 날짜 범위를 런타임에 주입
+* **자동 변환**: Long 포맷 → Wide 포맷 `(T, N)` 자동 변환
+
+#### 2. 아키텍처 흐름
+
+```
+ConfigLoader (config/data.yaml)
+        ↓
+   SQL 템플릿 로드
+        ↓
+DataLoader.load_field(field_name)
+        ↓
+   DuckDB 쿼리 실행
+   (Parquet 직접 읽기)
+        ↓
+   Long → Wide 피벗팅
+   (date × security_id → time × asset)
+        ↓
+   xr.DataArray 반환 (T, N)
+```
+
+#### 3. Config 기반 SQL 정의
+
+**config/data.yaml 예시:**
+```yaml
+adj_close:
+  query: >
+    SELECT 
+      date,
+      security_id,
+      close * adj_factor as adj_close
+    FROM read_parquet('data/pricevolume.parquet')
+    WHERE date >= '{start_date}' AND date <= '{end_date}'
+  time_col: date
+  asset_col: security_id
+  value_col: adj_close
+```
+
+**핵심 특징:**
+* `{start_date}`, `{end_date}`: 런타임 파라미터 치환
+* `read_parquet()`: DuckDB의 네이티브 Parquet 읽기
+* Long 포맷 반환: `(date, security_id, value)` 세 컬럼
+
+#### 4. 데이터 로딩 책임
+
+**DataLoader 역할:**
+1. **쿼리 실행**: DuckDB로 Parquet 파일 쿼리
+2. **파라미터 치환**: SQL 템플릿에 날짜 범위 주입
+3. **피벗팅**: Long 포맷 → Wide 포맷 (T, N) 변환
+4. **검증**: xarray.DataArray로 좌표계 통일
+
+**데이터 흐름:**
+```
+Parquet File (Long Format)
+         ↓
+   DuckDB Query (SQL)
+         ↓
+   DataFrame (date × security_id × value)
+         ↓
+   Pivot Operation
+         ↓
+   xarray.DataArray (time × asset)
+         ↓
+   Visitor Cache
+```
+
+*구체적인 구현은 implementation.md 참조*
+
+#### 5. Visitor 통합 흐름
+
+**Field 노드 방문 로직:**
+1. **캐시 확인**: Dataset에 이미 로드된 데이터인지 확인
+2. **지연 로딩**: 없으면 DataLoader를 통해 Parquet에서 로드
+3. **캐시 저장**: Dataset에 assign하여 재사용
+4. **INPUT MASKING**: 유니버스 마스크 적용 (xarray.where)
+
+**핵심 설계:**
+- **Lazy Loading**: 필요할 때만 Parquet 파일 읽기
+- **Caching**: 한 번 로드한 데이터는 Dataset에 캐싱
+- **Universe Integration**: 데이터 진입 시점에 마스킹
+
+#### 6. 미래 확장
+
+* **다중 DB 지원**: PostgreSQL, ClickHouse 등 커넥터 추가
+* **캐싱 전략**: 디스크 캐시로 반복 쿼리 최적화
+* **병렬 로딩**: 여러 필드 동시 로드
+* **증분 로드**: 새로운 날짜 범위만 추가 로드
 
 ## 2.3. 미래 확장: `DataTensor` 아키텍처 (Future Expansion)
 
@@ -72,84 +350,409 @@ PRD의 요구사항(F1, F2, F3)을 구현하기 위해 **퍼사드(Facade)**, **
 
 * 리서처는 `DataTensor`에 `matrix_` 연산자를 적용한 뒤, `matrix_row_mean(tensor)` (`(T, N)`로 **축소**) 또는 `flatten_pairs(tensor)` (`(T, M)`로 **평탄화**) 같은 연산자를 통해 `DataPanel`로 변환하여 `cs_rank` 등 `Panel` 전용 연산자를 다시 사용할 수 있습니다.
 
-## 2.4. 기능별 아키텍처 구현
+## 2.4. 기능별 아키텍처 구현 및 상태
 
-* **F1 (데이터 검색):**
+### ✅ **F1 (데이터 검색) - IMPLEMENTED**
 
-    1. `rc` 초기화 시 `ConfigLoader`가 `config/` 디렉토리의 YAML 파일들을 읽습니다 (e.g., `config/data.yaml`, `config/db.yaml`).
-    2. `rc.add_data('close', Field('adj_close'))` 호출 시, `rc`는 `Field('adj_close')`를 `rc.rules`에 등록합니다.
-    3. 이후 `EvaluateVisitor`가 `Field('adj_close')` 노드를 방문하면, `rc._config`에서 `adj_close` 설정을 조회하여 SQL을 실행합니다.
-    4. 결과 `(T, N)` `DataArray`를 `rc.db['close']`에 저장(캐시)합니다.
+**구현 완료**: ConfigLoader + DataLoader + Parquet/DuckDB 통합
 
-* **F2 (셀렉터 인터페이스):**
+1. `rc` 초기화 시 `ConfigLoader`가 `config/` 디렉토리의 YAML 파일들을 읽습니다 (e.g., `config/data.yaml`).
+2. `rc.add_data('close', Field('adj_close'))` 호출 시, `rc`는 `Field('adj_close')`를 `rc.rules`에 등록합니다.
+3. 이후 `EvaluateVisitor`가 `Field('adj_close')` 노드를 방문하면:
+   - `rc._config`에서 `adj_close` 설정을 조회하여 SQL 템플릿 획득
+   - `DataLoader`가 날짜 파라미터를 치환하고 DuckDB로 Parquet 파일 쿼리
+   - Long → Wide 피벗팅하여 `(T, N)` DataArray 생성
+4. 결과를 `rc.db['close']`에 저장(캐시)합니다.
 
-    1. `rc.add_data('size', cs_quantile(rc.data.mcap, ...))` 호출 시, `rc`는 이 `cs_quantile` `Expression` 객체를 `rc.rules['size']`에 등록합니다.
-    2. `rc._evaluator`가 `Expression`을 평가하여 `(T, N)` 레이블 배열을 생성하고, `rc.db = rc.db.assign({'size': result})`로 `data_vars`에 추가합니다.
-    3. 사용자가 `mask = rc.axis.size['small']`을 호출합니다.
-    4. `rc.axis` accessor는 이를 `(rc.db['size'] == 'small')`이라는 표준 `xarray` 불리언 인덱싱으로 변환합니다.
-    5. `(T, N)` 불리언 마스크가 반환됩니다.
-    6. 사용자가 `rc[mask] = 1.0`을 호출하면, `rc`는 `rc.db['my_alpha']` 캔버스에 `xr.where`를 사용하여 값을 할당(overwrite)합니다.
+**현재 구현**: ConfigLoader, DataLoader, Field 노드, 파라미터 치환, 피벗팅
 
-* **F3 (심층 추적성 - 정수 인덱스 기반):**
+---
 
-    1. **설계 동기:**
-          * 문자열 기반 step 이름(`step='ts_mean'`)은 연산자 이름 변경 시 깨지고, 동일 연산자가 여러 번 사용될 때 모호하며, 런타임 오류에 취약합니다.
-          * 정수 인덱스는 견고하고(robust), 예측 가능하며(predictable), 타입 안전합니다(type-safe).
+### 🔨 **F3 (심층 추적성) - PARTIAL**
+
+**구현 완료**: 정수 기반 step 인덱싱, 듀얼 캐시 아키텍처, 가중치 추적  
+**미구현**: PnLTracer 및 trace_pnl() API
+
+1. **설계 동기:**
+   * 문자열 기반 step 이름(`step='ts_mean'`)은 연산자 이름 변경 시 깨지고, 동일 연산자가 여러 번 사용될 때 모호하며, 런타임 오류에 취약합니다.
+   * 정수 인덱스는 견고하고(robust), 예측 가능하며(predictable), 타입 안전합니다(type-safe).
+
+2. `rc._evaluator` (Visitor)는 **"Stateful(상태 저장)"** 객체입니다.
+
+3. **Dual-Cache 구조 ✅**: `EvaluateVisitor`는 PnL 분석을 위한 이중 캐시를 소유합니다:
+   * **`_signal_cache: dict[int, tuple[str, xr.DataArray]]`** (영속적)
+     - 키: **정수 step 인덱스** (0부터 시작)
+     - 값: `(노드_이름, signal_DataArray)` 튜플
+     - **영속성**: scaler 변경 시에도 유지됨 (효율성)
+   
+   * **`_weight_cache: dict[int, tuple[str, Optional[xr.DataArray]]]`** (갱신 가능)
+     - 키: **정수 step 인덱스** (0부터 시작)
+     - 값: `(노드_이름, weights_DataArray or None)` 튜플
+     - **갱신성**: scaler 변경 시 재계산됨
+     - **조건부**: scaler가 제공된 경우에만 채워짐
+
+4. **캐싱 로직 ✅**: Visitor는 `Expression` 트리를 **깊이 우선 탐색(depth-first)** 으로 순회하면서 **각 노드가 반환하는 중간 결과를 순차적으로 캐시**합니다.
+   * 예시 Expression: `rank(ts_mean(Field('returns'), 3))`
+   * `signal_cache[0]` = `('Field_returns', DataArray(...))`
+   * `signal_cache[1]` = `('TsMean', DataArray(...))`
+   * `signal_cache[2]` = `('Rank', DataArray(...))`
+   * scaler가 제공되면 각 step의 `weight_cache[i]`에도 포트폴리오 가중치 저장
+
+5. **병렬 Expression 예시:**
+   * `ts_mean(Field('returns'), 3) + rank(Field('market_cap'))`
+   * step 0: `Field('returns')`
+   * step 1: `ts_mean(Field('returns'), 3)`
+   * step 2: `Field('market_cap')` ← 두 번째 브랜치
+   * step 3: `rank(Field('market_cap'))`
+   * step 4: `add(step1, step3)` ← 병합
+
+6. **Weight Caching (새로운 기능) ✅**:
+   * **API**: `rc.evaluate(expr, scaler=DollarNeutralScaler())`
+   * **동작**: 평가 중 각 step에서 signal과 weight를 모두 캐싱
+   * **효율성**: scaler 변경 시 signal 캐시 재사용, weight만 재계산
+   * **접근**: `rc.get_weights(step)` 편의 메서드로 weight 조회
+   * **사용 사례**: 
+     - Step-by-step PnL 분석 (어느 연산자가 성능에 기여?)
+     - 스케일링 전략 비교 (signal 재평가 없이)
+     - Attribution 분석 (signal 생성 vs. weight 스케일링)
+
+7. **Dual-Cache 사용 패턴 ✅**:
+   ```python
+   # 초기 평가 with scaler
+   result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+   
+   # 각 step의 signal과 weight 접근
+   for step in range(len(rc._evaluator._signal_cache)):
+       name, signal = rc._evaluator.get_cached_signal(step)
+       name, weights = rc._evaluator.get_cached_weights(step)
+       
+       if weights is not None:
+           print(f"Step {step} ({name}):")
+           print(f"  Signal range: [{signal.min():.2f}, {signal.max():.2f}]")
+           print(f"  Gross: {abs(weights).sum(dim='asset').mean():.2f}")
+           print(f"  Net: {weights.sum(dim='asset').mean():.2f}")
+   
+   # Scaler 교체 (효율적! signal 캐시 재사용)
+   result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.3))
+   # signal_cache 변경 없음, weight_cache만 재계산
+   ```
+
+8. **Dual-Cache 핵심 이점**:
+   * **효율성**: Scaler 변경 시 signal 재평가 불필요 (재사용)
+   * **추적성**: 모든 step에서 signal과 weight 모두 접근 가능
+   * **연구 친화적**: 동일 signal에 여러 스케일링 전략 쉽게 비교
+   * **유연성**: weight 캐시는 선택적 (scaler 없으면 None)
+   * **PnL 준비**: 미래 PnLTracer 구현을 위한 기반 완비
+
+9. **📋 미구현**: 선택적 추적 API
+   * `rc.trace_pnl('alpha1', step=1)` - 계획만 있음
+   * `rc.get_intermediate('alpha1', step=1)` - 계획만 있음
+   * `PnLTracer` 컴포넌트 - 아직 구현 안 됨 (하지만 dual-cache로 기반 준비 완료)
+
+10. **Visitor의 step 카운터 ✅**: `EvaluateVisitor._step_counter` 변수를 유지하며, 각 노드 방문 시 증가시켜 순차적 인덱스를 부여합니다.
+
+11. **Triple-Cache Backtesting (새로운 기능) ✅**:
+    * **캐시 구조**:
+      - `_signal_cache`: 영구적 (scaler 변경 시에도 유지)
+      - `_weight_cache`: 갱신 가능 (scaler 변경 시 재계산)
+      - `_port_return_cache`: 갱신 가능 (scaler 변경 시 재계산, NEW!)
     
-    2. `rc._evaluator` (Visitor)는 **"Stateful(상태 저장)"** 객체입니다.
+    * **자동 백테스트 실행**:
+      - `rc.evaluate(expr, scaler=...)` 호출 시 자동으로 백테스트 실행
+      - 각 step에서 signal, weights, portfolio returns 모두 캐싱
+      - Return 데이터는 초기화 시 자동 로드 (mandatory)
     
-    3. **Cache 구조:** `EvaluateVisitor`는 내부에 `cache: dict[str, dict[int, tuple[str, xr.DataArray]]]`를 소유합니다.
-          * 외부 키: 변수명 (e.g., `'alpha1'`)
-          * 내부 키: **정수 step 인덱스** (0부터 시작)
-          * 값: `(노드_이름, DataArray)` 튜플 - 노드 이름은 디버깅용 메타데이터
+    * **Shift-Mask 워크플로우** (Forward-Bias 방지):
+      1. 가중치를 1일 shift: `weights_shifted = weights.shift(time=1)`
+      2. 현재 universe로 re-mask: `final_weights = weights_shifted.where(universe)`
+      3. Return을 universe로 mask: `returns_masked = returns.where(universe)`
+      4. Element-wise 곱셈: `port_return = final_weights * returns_masked`
     
-    4. `rc.add_data_var('alpha1', ...)`가 호출되면, `Visitor`는 `alpha1`의 `Expression` 트리를 **깊이 우선 탐색(depth-first)** 으로 순회하면서 **각 노드가 반환하는 중간 결과를 순차적으로 캐시**합니다.
-          * 예시 Expression: `group_neutralize(ts_mean(Field('returns'), 3), 'subindustry')`
-          * `cache['alpha1'][0]` = `('Field_returns', DataArray(...))`
-          * `cache['alpha1'][1]` = `('ts_mean', DataArray(...))`
-          * `cache['alpha1'][2]` = `('group_neutralize', DataArray(...))`
+    * **Position-Level Returns** (Shape 보존):
+      - Portfolio return은 `(T, N)` shape으로 캐싱 (즉시 집계 안 함)
+      - Winner/loser 분석 가능 (어떤 종목이 PnL 기여?)
+      - 온디맨드 집계: `daily_pnl = port_return.sum(dim='asset')`
     
-    5. **병렬 Expression 예시:** `ts_mean(Field('returns'), 3) + rank(Field('market_cap'))`
-          * step 0: `Field('returns')`
-          * step 1: `ts_mean(Field('returns'), 3)`
-          * step 2: `Field('market_cap')` ← 두 번째 브랜치 시작
-          * step 3: `rank(Field('market_cap'))`
-          * step 4: `add(step1, step3)` ← 병합
-    
-    6. **선택적 추적:**
-          * `rc.trace_pnl('alpha1', step=1)`: `cache['alpha1'][1]`의 데이터만 사용하여 PnL 계산
-          * `rc.trace_pnl('alpha1', step=None)`: 모든 단계의 PnL을 순서대로 계산
-          * `rc.get_intermediate('alpha1', step=1)`: `cache['alpha1'][1][1]` 반환 (DataArray 부분)
-    
-    7. `PnLTracer`는 **재계산 없이(no re-computation)** 캐시된 배열들로 PnL을 계산합니다.
-    
-    8. **Visitor의 step 카운터:** `EvaluateVisitor._step_counter` 변수를 유지하며, 각 노드 방문 시 증가시켜 순차적 인덱스를 부여합니다.
+    * **API 메서드**:
+      - `rc.get_port_return(step)`: Position-level returns `(T, N)`
+      - `rc.get_daily_pnl(step)`: Daily PnL `(T,)` (온디맨드 집계)
+      - `rc.get_cumulative_pnl(step)`: Cumulative PnL `(T,)` (cumsum 사용)
 
-* **F4 (팩터 수익률 계산 - 독립/종속 정렬):**
+12. **Triple-Cache 사용 패턴 ✅**:
+    ```python
+    # Return 데이터는 자동 로드 (config/data.yaml의 'returns' 필드)
+    rc = AlphaCanvas(start_date='2024-01-01', end_date='2024-12-31')
+    
+    # Scaler와 함께 평가 (백테스트 자동 실행)
+    result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+    
+    # Position-level returns 접근 (winner/loser 분석)
+    port_return = rc.get_port_return(step=2)  # (T, N) shape
+    total_contrib = port_return.sum(dim='time')
+    best_stock = total_contrib.argmax(dim='asset')
+    worst_stock = total_contrib.argmin(dim='asset')
+    
+    # Daily PnL 및 성과 지표
+    daily_pnl = rc.get_daily_pnl(step=2)  # (T,)
+    sharpe = daily_pnl.mean() / daily_pnl.std() * np.sqrt(252)
+    
+    # Cumulative PnL (cumsum 사용, 시간 불변)
+    cum_pnl = rc.get_cumulative_pnl(step=2)
+    final_pnl = cum_pnl.isel(time=-1).values
+    
+    # Scaler 교체 (효율적! signal 캐시 재사용)
+    result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.5))
+    # signal_cache 변경 없음, weight_cache와 port_return_cache만 재계산
+    ```
 
-    1. F2의 셀렉터 인터페이스를 활용하여 다차원 팩터 포트폴리오를 구성합니다.
-    2. **독립 정렬 (Independent Sort) 구현:**
-          * 각 팩터를 `cs_quantile`로 버킷화하여 독립적인 축(axis)으로 등록합니다.
-          * 모든 quantile 계산은 **전체 유니버스** 대상으로 수행됩니다.
-          * 예: `rc.add_data('size', cs_quantile(rc.data.mcap, ...))`
-    3. **종속 정렬 (Dependent Sort) 구현:**
-          * `cs_quantile`의 `group_by` 파라미터를 사용합니다. (pandas-like 인터페이스)
-          * **구현 방식 (xarray.groupby 활용):**
-                1. `cs_quantile(..., group_by='size')` 호출 시
-                2. `EvaluateVisitor.visit_cs_quantile()`에서:
-                      - `group_by`가 문자열이면, `rc.db[group_by]`로 그룹 레이블 `DataArray`를 조회합니다.
-                      - `data_array.groupby(rc.db['size'])`로 xarray groupby 객체를 생성합니다.
-                      - `.apply(quantile_function, ...)`를 호출하여 각 그룹('small', 'big')별로 별도 quantile을 계산합니다.
-                      - xarray가 자동으로 그룹별 결과를 단일 `DataArray`로 병합하여 반환합니다.
-          * 예: `rc.add_data('value', cs_quantile(rc.data.btm, group_by='size', ...))`
-          * 이는 `xarray.groupby().apply()`의 표준 사용 패턴입니다.
-    4. **로우레벨 마스크 (Mask) 구현:**
-          * `cs_quantile(..., mask=boolean_mask)` 호출 시
-          * `EvaluateVisitor`는 mask가 `True`인 항목들에 대해서만 quantile을 계산합니다.
-          * mask가 `False`인 항목은 `NaN` 또는 특수 레이블로 처리됩니다.
-          * 예: `rc.add_data('momentum', cs_quantile(rc.data.returns, mask=high_liquidity, ...))`
-    5. **Fama-French 재현:** 이 패턴들로 독립/종속 이중 정렬 기반 SMB, HML 팩터를 정확히 재현할 수 있습니다.
-    6. 이는 alpha-canvas의 핵심 활용 사례이며, 듀얼 인터페이스의 강력함을 보여주는 패턴입니다.
+13. **Re-Masking의 중요성** (NaN Pollution 방지):
+    * **문제**: 종목이 universe에서 퇴출 → weight가 NaN → `NaN * return = NaN` → PnL이 NaN
+    * **해결책**: Shift 후 현재 universe로 re-mask → 퇴출된 포지션 청산
+    * **검증**: Experiment 19에서 stock exit/entry 시나리오 모두 검증 완료
+
+14. **Cumsum vs Cumprod** (공정한 전략 비교):
+    * **Cumsum**: 시간 불변 (순서와 무관, 공정한 비교)
+    * **Cumprod**: 복리 효과로 시간 의존적 (긴 전략에 유리, 불공정)
+    * **선택**: Cumsum을 기본 메트릭으로 사용 (연구 친화적)
+
+15. **미래 PnLTracer 통합**:
+    ```python
+    # 미래 API (계획)
+    pnl_tracer = PnLTracer(rc._evaluator, returns_data)
+    step_pnls = pnl_tracer.decompose_by_step()
+    # {'step_0': {'pnl': ..., 'sharpe': ...},
+    #  'step_1': {'pnl': ..., 'sharpe': ...}, ...}
+    
+    # Scaler 비교
+    scaler_comparison = pnl_tracer.compare_scalers([
+        DollarNeutralScaler(),
+        GrossNetScaler(2.0, 0.2),
+        LongOnlyScaler(1.0)
+    ])
+    ```
+
+---
+
+### 🔨 **F2 (셀렉터 인터페이스) - PARTIAL**
+
+**상태**: Phase 7B 완료 (DataAccessor), Phase 7A 완료 (Boolean Expressions)
+
+**✅ 구현 완료**:
+- ✅ `rc.data` DataAccessor: Expression-based field access
+- ✅ Boolean Expression infrastructure: `==`, `!=`, `<`, `>`, `<=`, `>=`, `&`, `|`, `~`
+- ✅ Lazy evaluation with universe masking through Visitor
+
+**사용 패턴**:
+
+1. **필드 접근**: `rc.data['size']` → `Field('size')` Expression (lazy)
+2. **비교 생성**: `rc.data['size'] == 'small'` → `Equals` Expression (lazy)
+3. **논리 연산**: `(rc.data['size'] == 'small') & (rc.data['momentum'] == 'high')` → `And` Expression
+4. **평가**: `rc.evaluate(mask)` → boolean DataArray with universe masking
+
+**예시**:
+
+```python
+# 기본 선택
+small_mask = rc.data['size'] == 'small'
+result = rc.evaluate(small_mask)
+
+# 복합 선택 (Fama-French style)
+ff_mask = (rc.data['size'] == 'small') & (rc.data['value'] == 'high')
+result = rc.evaluate(ff_mask)
+
+# 수치 비교
+penny_stocks = rc.data['price'] < 5.0
+result = rc.evaluate(penny_stocks)
+```
+
+**📋 아직 구현 필요**:
+- [ ] `cs_quantile` 연산자 (Phase 7C)
+- [ ] `rc[mask] = value` 할당 로직 (Phase 7D)
+- [ ] `init_signal_canvas()` 메서드 (Phase 7D)
+
+---
+
+### 📋 **F4 (팩터 수익률 계산) - PLANNED**
+
+**상태**: F2에 의존, 설계 완료
+
+1. F2의 셀렉터 인터페이스를 활용하여 다차원 팩터 포트폴리오를 구성합니다.
+2. **독립 정렬 (Independent Sort) 구현:**
+   * 각 팩터를 `cs_quantile`로 버킷화하여 독립적인 축(axis)으로 등록합니다.
+   * 모든 quantile 계산은 **전체 유니버스** 대상으로 수행됩니다.
+   * 예: `rc.add_data('size', cs_quantile(rc.data.mcap, ...))`
+3. **종속 정렬 (Dependent Sort) 구현:**
+   * `cs_quantile`의 `group_by` 파라미터를 사용합니다. (pandas-like 인터페이스)
+   * **구현 방식 (xarray.groupby 활용):**
+     1. `cs_quantile(..., group_by='size')` 호출 시
+     2. `EvaluateVisitor.visit_cs_quantile()`에서:
+        - `group_by`가 문자열이면, `rc.db[group_by]`로 그룹 레이블 `DataArray`를 조회합니다.
+        - `data_array.groupby(rc.db['size'])`로 xarray groupby 객체를 생성합니다.
+        - `.apply(quantile_function, ...)`를 호출하여 각 그룹('small', 'big')별로 별도 quantile을 계산합니다.
+   * 예: `rc.add_data('value', cs_quantile(rc.data.btm, group_by='size', ...))`
+4. **로우레벨 마스크 (Mask) 구현:**
+   * `cs_quantile(..., mask=boolean_mask)` 호출 시
+   * `EvaluateVisitor`는 mask가 `True`인 항목들에 대해서만 quantile을 계산합니다.
+5. **Fama-French 재현:** 이 패턴들로 독립/종속 이중 정렬 기반 SMB, HML 팩터를 정확히 재현할 수 있습니다.
+
+**구현 필요 사항**:
+- [ ] `cs_quantile` 연산자 (group_by, mask 파라미터)
+- [ ] xarray.groupby().apply() 통합
+- [ ] 셀렉터 기반 포트폴리오 구성 로직
+
+---
+
+### 📋 **F5 (포트폴리오 구성) - PLANNED**
+
+**상태**: 설계 완료, 구현 대기
+
+#### 1. 아키텍처 개요
+
+**Strategy Pattern** 기반의 포트폴리오 가중치 스케일링 시스템입니다.
+
+```mermaid
+classDiagram
+    class WeightScaler {
+        <<abstract>>
+        +scale(signal: DataArray) DataArray
+        #_validate_signal(signal)
+    }
+    
+    class GrossNetScaler {
+        -target_gross: float
+        -target_net: float
+        -L_target: float
+        -S_target: float
+        +scale(signal: DataArray) DataArray
+        #_scale_single_period(signal_slice)
+    }
+    
+    class DollarNeutralScaler {
+        +scale(signal: DataArray) DataArray
+    }
+    
+    class LongOnlyScaler {
+        -target_long: float
+        +scale(signal: DataArray) DataArray
+        #_scale_single_period(signal_slice)
+    }
+    
+    class AlphaCanvas {
+        +scale_weights(signal, scaler) DataArray
+    }
+    
+    WeightScaler <|-- GrossNetScaler
+    WeightScaler <|-- LongOnlyScaler
+    GrossNetScaler <|-- DollarNeutralScaler
+    AlphaCanvas ..> WeightScaler : uses
+```
+
+#### 2. 설계 원칙
+
+**Stateless Design (Option 1)**:
+- 스케일러는 상태를 저장하지 않음
+- 항상 명시적으로 파라미터로 전달
+- 재사용 가능 (동일 인스턴스를 여러 시그널에 적용)
+
+**근거**:
+1. **Research-Friendly**: 동일 시그널에 여러 스케일러 쉽게 비교
+2. **Explicit over Implicit**: 어떤 스케일러를 사용하는지 항상 명확
+3. **No Hidden State**: AlphaCanvas가 스케일러 상태를 관리하지 않음
+4. **Sklearn-like**: `transformer.transform(X)` 패턴과 유사
+
+#### 3. 통합 프레임워크: GrossNetScaler
+
+**수학적 모델**:
+- 입력: `target_gross` ($G$), `target_net` ($N$)
+- 출력: 롱/숏 타겟 계산
+  $$L_{\text{target}} = \frac{G + N}{2}, \quad S_{\text{target}} = \frac{G - N}{2}$$
+
+**처리 흐름 (완전 벡터화)**:
+```
+Signal (T, N) with arbitrary values
+    ↓
+Separate positive/negative (vectorized)
+    ↓
+Normalize: s_pos/sum(s_pos), |s_neg|/sum(|s_neg|)  [handle 0/0 → NaN → 0]
+    ↓
+Apply targets: weights = norm_pos * L_target - norm_neg * |S_target|
+    ↓
+Calculate actual_gross per row (vectorized)
+    ↓
+Scale to meet target: weights * (target_gross / actual_gross)  [handle 0/0 with xr.where]
+    ↓
+Convert computational NaN to 0 (fillna before universe mask)
+    ↓
+Apply universe mask (preserves signal NaN)
+    ↓
+Weights (T, N) satisfying gross constraint
+```
+
+**핵심 혁신**:
+- **NO ITERATION**: 순수 벡터화 연산 (Python 루프 없음)
+- **성능**: 7-34ms for 10×6 to 1000×500 datasets
+- **견고성**: Gross target 항상 충족 (one-sided signals 포함)
+- **스케일링 우선순위**: Gross > Net (Net은 mixed signals에서만 달성 가능)
+
+#### 4. Facade 통합
+
+```python
+class AlphaCanvas:
+    def scale_weights(
+        self, 
+        signal: Union[Expression, xr.DataArray],
+        scaler: WeightScaler
+    ) -> xr.DataArray:
+        """Scale signal to portfolio weights.
+        
+        Args:
+            signal: Expression or DataArray with signal values
+            scaler: WeightScaler strategy (REQUIRED - no default)
+        
+        Returns:
+            (T, N) DataArray with portfolio weights
+        
+        Note:
+            Scaler must be explicitly provided.
+            This is intentional for research-friendly, explicit API.
+        """
+        # Evaluate if Expression
+        if hasattr(signal, 'accept'):
+            signal_data = self.evaluate(signal)
+        else:
+            signal_data = signal
+        
+        # Apply scaling strategy (delegation)
+        weights = scaler.scale(signal_data)
+        
+        return weights
+```
+
+#### 5. 사용 패턴
+
+```python
+# Pattern 1: Direct scaler usage
+scaler = DollarNeutralScaler()
+signal_data = rc.evaluate(ts_mean(Field('returns'), 5))
+weights = scaler.scale(signal_data)
+
+# Pattern 2: Facade convenience method
+scaler = GrossNetScaler(target_gross=2.0, target_net=0.2)
+weights = rc.scale_weights(ts_mean(Field('returns'), 5), scaler)
+
+# Pattern 3: Compare multiple scalers
+signal = rc.evaluate(my_alpha_expr)
+w1 = DollarNeutralScaler().scale(signal)
+w2 = GrossNetScaler(2.0, 0.4).scale(signal)
+w3 = LongOnlyScaler(1.0).scale(signal)
+```
+
+#### 6. 미래 확장
+
+- `RiskTargetScaler(target_vol, cov_matrix)`: 리스크 기반
+- `OptimizationScaler(constraints)`: cvxpy 최적화
+- `SoftmaxScaler(temperature)`: 확률적 가중치
+- Position limits, turnover constraints 등
 
 ## 2.3. 설계 원칙 및 근거
 

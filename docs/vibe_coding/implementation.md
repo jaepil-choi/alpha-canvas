@@ -25,6 +25,10 @@ alpha-canvas/
 │       │   ├── classification.py # cs_quantile, cs_cut (분류기/축 생성)
 │       │   ├── transform.py    # group_neutralize, etc.
 │       │   └── tensor.py       # 미래 확장용 (MVP에서는 비어있음)
+│       ├── portfolio/          # 포트폴리오 구성
+│       │   ├── __init__.py
+│       │   ├── base.py         # WeightScaler 추상 베이스 클래스
+│       │   └── strategies.py   # GrossNetScaler, DollarNeutralScaler, LongOnlyScaler
 │       ├── analysis/
 │       │   ├── pnl.py          # PnLTracer
 │       │   └── metrics.py      # 성과 지표 계산
@@ -55,6 +59,7 @@ rc = AlphaCanvas(config_dir='./custom_config')
 ```
 
 **구현 요구사항:**
+
 - `AlphaCanvas.__init__()` 내부에서 `ConfigLoader`를 생성하고 `config/` 디렉토리의 모든 `.yaml` 파일을 로드합니다.
 - `ConfigLoader`는 `data.yaml`, `db.yaml` 등을 각각 파싱하여 내부 dict에 저장합니다.
 
@@ -82,6 +87,7 @@ def add_data(self, name: str, data: Union[Expression, xr.DataArray]) -> None:
 ```
 
 **핵심 사항:**
+
 - `xarray.Dataset.assign()`을 사용하여 Data Variable로 추가
 - `Expression`과 `DataArray` 모두 지원 (오버로딩)
 - Open Toolkit 철학: 외부 계산 결과를 seamlessly inject
@@ -96,36 +102,256 @@ def db(self) -> xr.Dataset:
 ```
 
 **핵심 사항:**
+
 - 래핑 없이 순수 `xarray.Dataset` 반환
 - 사용자는 `pure_ds = rc.db`로 꺼내서 scipy/statsmodels 사용 가능
 
-#### C. `rc.axis` Accessor 구현 (Selector Interface)
+#### C. 유니버스 마스킹 (Universe Masking) ✅ **IMPLEMENTED**
+
+**요구사항**: 초기화 시 유니버스를 설정하고, 모든 데이터와 연산에 자동 적용
 
 ```python
-class AxisAccessor:
-    """rc.axis.size['small'] → (rc.db['size'] == 'small')로 변환"""
-    
-    def __init__(self, rc: 'AlphaCanvas'):
-        self._rc = rc
-    
-    def __getattr__(self, axis_name: str) -> 'AxisSelector':
-        if axis_name not in self._rc.db:
-            raise AttributeError(f"Axis '{axis_name}' not found in rc.db")
-        return AxisSelector(self._rc.db[axis_name])
+# AlphaCanvas 초기화 with universe
+rc = AlphaCanvas(
+    start_date='2024-01-01',
+    end_date='2024-12-31',
+    universe=price > 5.0  # Boolean DataArray
+)
 
-class AxisSelector:
-    def __init__(self, data_var: xr.DataArray):
-        self._data_var = data_var
+# 또는 Expression으로 설정
+rc = AlphaCanvas(
+    start_date='2024-01-01',
+    end_date='2024-12-31',
+    universe=Field('univ500')  # Field Expression (미래 확장)
+)
+
+# 유니버스 확인 (read-only)
+print(f"Universe coverage: {rc.universe.sum().values} positions")
+```
+
+**구현 세부사항**:
+
+**1. AlphaCanvas에 universe 파라미터 추가**:
+```python
+class AlphaCanvas:
+    def __init__(
+        self,
+        config_dir='config',
+        start_date=None,
+        end_date=None,
+        time_index=None,
+        asset_index=None,
+        universe: Optional[Union[Expression, xr.DataArray]] = None  # NEW
+    ):
+        # ... 기존 초기화 ...
+        
+        # Universe mask 초기화 (불변)
+        self._universe_mask: Optional[xr.DataArray] = None
+        if universe is not None:
+            self._set_initial_universe(universe)
     
-    def __getitem__(self, label: str) -> xr.DataArray:
-        # 표준 xarray 불리언 인덱싱
-        return (self._data_var == label)
+    def _set_initial_universe(self, universe: Union[Expression, xr.DataArray]) -> None:
+        """유니버스 마스크를 초기화 시 한 번만 설정 (불변)."""
+        # Expression 평가 (e.g., Field('univ500'))
+        if isinstance(universe, Expression):
+            universe_data = self._evaluator.evaluate(universe)
+        else:
+            universe_data = universe
+        
+        # Shape 검증
+        expected_shape = (
+            len(self._panel.db.coords['time']), 
+            len(self._panel.db.coords['asset'])
+        )
+        if universe_data.shape != expected_shape:
+            raise ValueError(
+                f"Universe mask shape {universe_data.shape} doesn't match "
+                f"data shape {expected_shape}"
+            )
+        
+        # Dtype 검증
+        if universe_data.dtype != bool:
+            raise TypeError(f"Universe must be boolean, got {universe_data.dtype}")
+        
+        # 불변 저장
+        self._universe_mask = universe_data
+        
+        # Evaluator에 전파 (자동 적용 위해)
+        self._evaluator._universe_mask = self._universe_mask
+    
+    @property
+    def universe(self) -> Optional[xr.DataArray]:
+        """유니버스 마스크 조회 (read-only)."""
+        return self._universe_mask
+```
+
+**2. EvaluateVisitor에 이중 마스킹 구현**:
+```python
+class EvaluateVisitor:
+    def __init__(self, data_source: xr.Dataset, data_loader=None):
+        self._data = data_source
+        self._data_loader = data_loader
+        self._universe_mask: Optional[xr.DataArray] = None  # AlphaCanvas가 설정
+        self._cache: Dict[int, Tuple[str, xr.DataArray]] = {}
+        self._step_counter = 0
+    
+    def visit_field(self, node) -> xr.DataArray:
+        """Field 노드 방문 with INPUT MASKING."""
+        # 필드 로드 (캐시 또는 DataLoader)
+        if node.name in self._data:
+            result = self._data[node.name]
+        else:
+            if self._data_loader is None:
+                raise RuntimeError(f"Field '{node.name}' not found")
+            result = self._data_loader.load_field(node.name)
+            self._data = self._data.assign({node.name: result})
+        
+        # INPUT MASKING: 필드 검색 시 유니버스 적용
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        
+        self._cache_result(f"Field_{node.name}", result)
+        return result
+    
+    def visit_operator(self, node) -> xr.DataArray:
+        """연산자 방문 with OUTPUT MASKING."""
+        # 1. 순회: 자식 평가 (이미 마스킹됨)
+        child_result = node.child.accept(self)
+        
+        # 2. 위임: 연산자의 compute() 호출
+        result = node.compute(child_result)
+        
+        # 3. OUTPUT MASKING: 연산 결과에 유니버스 적용
+        if self._universe_mask is not None:
+            result = result.where(self._universe_mask, np.nan)
+        
+        # 4. 캐싱
+        operator_name = node.__class__.__name__
+        self._cache_result(operator_name, result)
+        
+        return result
+```
+
+**3. add_data()에서 주입 데이터 마스킹**:
+```python
+def add_data(self, name: str, data: Union[Expression, xr.DataArray]) -> None:
+    """데이터 추가 with 유니버스 마스킹."""
+    if isinstance(data, Expression):
+        # Expression 경로 - Evaluator가 자동 마스킹
+        self.rules[name] = data
+        result = self._evaluator.evaluate(data)
+        self._panel.add_data(name, result)
+        
+        # Evaluator 재동기화 시 유니버스 보존
+        self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+        if self._universe_mask is not None:
+            self._evaluator._universe_mask = self._universe_mask
+    
+    elif isinstance(data, xr.DataArray):
+        # DataArray 직접 주입 - 여기서 마스킹
+        if self._universe_mask is not None:
+            data = data.where(self._universe_mask, float('nan'))
+        
+        self._panel.add_data(name, data)
+        self._evaluator = EvaluateVisitor(self._panel.db, self._data_loader)
+        if self._universe_mask is not None:
+            self._evaluator._universe_mask = self._universe_mask
+```
+
+**핵심 사항**:
+- **불변성**: 유니버스는 초기화 시 한 번만 설정, 변경 불가
+- **이중 마스킹**: Field 입력 + Operator 출력 모두 마스킹 (신뢰 체인)
+- **Open Toolkit**: 주입된 DataArray도 자동 마스킹
+- **성능**: 13.6% 오버헤드 (xarray lazy evaluation으로 무시 가능)
+
+---
+
+#### D. `rc.data` Accessor 구현 (Selector Interface) ✅ **IMPLEMENTED**
+
+**설계 철학**: Expression 기반 필드 접근으로 지연 평가 및 유니버스 안전성 보장
+
+```python
+from alpha_canvas.core.expression import Field
+
+
+class DataAccessor:
+    """rc.data accessor that returns Field Expressions.
+    
+    This enables Expression-based data access:
+        rc.data['field_name'] → Field('field_name')
+        rc.data['size'] == 'small' → Equals(Field('size'), 'small')
+    
+    Field Expressions remain lazy until explicitly evaluated,
+    ensuring universe masking through the Visitor pattern.
+    """
+    
+    def __getitem__(self, field_name: str) -> Field:
+        """Return Field Expression for the given field name.
+        
+        Args:
+            field_name: Name of the field to access
+            
+        Returns:
+            Field Expression wrapping the field name
+            
+        Raises:
+            TypeError: If field_name is not a string
+        """
+        if not isinstance(field_name, str):
+            raise TypeError(
+                f"Field name must be string, got {type(field_name).__name__}"
+            )
+        
+        return Field(field_name)
+    
+    def __getattr__(self, name: str):
+        """Prevent attribute access - only item access allowed.
+        
+        This ensures a single, consistent access pattern.
+        """
+        raise AttributeError(
+            f"DataAccessor does not support attribute access. "
+            f"Use rc.data['{name}'] instead of rc.data.{name}"
+        )
+```
+
+**AlphaCanvas 통합**:
+
+```python
+class AlphaCanvas:
+    def __init__(self, ...):
+        # ... existing init ...
+        self._data_accessor = DataAccessor()  # Create once, reuse
+    
+    @property
+    def data(self) -> DataAccessor:
+        """Access data fields as Field Expressions."""
+        return self._data_accessor
 ```
 
 **핵심 사항:**
-- `rc.axis.size['small']`은 단순한 syntactic sugar
-- 실제로는 `(rc.db['size'] == 'small')`이라는 표준 xarray 연산
-- 별도의 Expression 생성 없이 즉시 Boolean mask 반환
+
+- ✅ **Expression 반환**: `rc.data['size']` → `Field('size')` (lazy)
+- ✅ **Lazy 평가**: 명시적 `rc.evaluate()` 호출 전까지 평가 안 됨
+- ✅ **유니버스 안전**: 모든 Expression은 Visitor를 통해 평가되어 유니버스 마스킹 보장
+- ✅ **Composable**: `ts_mean(rc.data['returns'], 10)` 같은 체이닝 가능
+- ✅ **Item access only**: `rc.data['field']`만 지원, `rc.data.field`는 에러
+- ✅ **통합**: Phase 7A Boolean Expression과 완벽 통합
+
+**사용 패턴**:
+
+```python
+# ✅ Correct pattern (Expression-based)
+mask = rc.data['size'] == 'small'  # Returns Equals Expression
+result = rc.evaluate(mask)         # Evaluates with universe masking
+
+# ✅ Complex pattern
+mask = (rc.data['size'] == 'small') & (rc.data['momentum'] == 'high')
+result = rc.evaluate(mask)
+
+# ❌ Wrong pattern (not supported)
+mask = rc.data.size == 'small'  # AttributeError
+```
 
 ### 3.2.3. Interface A: Formula-based (Excel-like)
 
@@ -145,8 +371,8 @@ alpha_expr = group_neutralize(
 # 3. Expression을 변수로 등록
 rc.add_data_var('alpha1', alpha_expr)
 
-# 4. 데이터 접근
-alpha1_data = rc.data.alpha1  # xarray.DataArray (T, N)
+# 4. 데이터 접근 (evaluated data)
+alpha1_data = rc.db['alpha1']  # xarray.DataArray (T, N)
 ```
 
 **구현 요구사항:**
@@ -167,14 +393,14 @@ rc.add_data('mcap', Field('market_cap'))
 rc.add_data('ret', Field('returns'))
 rc.add_data('vol', Field('volume'))
 
-# 3. 가상 축(Axis) 정의 - 레이블 기반 버킷
-rc.add_data('size', cs_quantile(rc.data.mcap, bins=3, labels=['small', 'mid', 'big']))
-rc.add_data('momentum', cs_quantile(rc.data.ret, bins=2, labels=['low', 'high']))
-rc.add_data('surge', ts_any(rc.data.ret > 0.3, window=252))  # Boolean
+# 3. 분류 데이터 정의 - 레이블 기반 버킷
+rc.add_data('size', cs_quantile(rc.data['mcap'], bins=3, labels=['small', 'mid', 'big']))
+rc.add_data('momentum', cs_quantile(rc.data['ret'], bins=2, labels=['low', 'high']))
+rc.add_data('surge', ts_any(rc.data['ret'] > 0.3, window=252))  # Boolean
 
-# 4. 셀렉터로 Boolean 마스크 생성
-mask_long = (rc.axis.size['small'] & rc.axis.momentum['high'] & rc.axis.surge)
-mask_short = (rc.axis.size['big'] & rc.axis.momentum['low'])
+# 4. 비교 연산으로 Boolean 마스크 생성
+mask_long = (rc.data['size'] == 'small') & (rc.data['momentum'] == 'high') & (rc.data['surge'] == True)
+mask_short = (rc.data['size'] == 'big') & (rc.data['momentum'] == 'low')
 
 # 5. NumPy-style 할당
 rc['my_alpha'][mask_long] = 1.0
@@ -183,18 +409,18 @@ rc['my_alpha'][mask_short] = -1.0
 # 또는 현재 활성 캔버스에 직접 할당
 rc[mask_long] = 1.0
 
-# 6. 최종 시그널 접근
-my_alpha = rc.data.my_alpha  # xarray.DataArray (T, N)
+# 6. 최종 시그널 접근 (evaluated data)
+my_alpha = rc.db['my_alpha']  # xarray.DataArray (T, N)
 ```
 
 **구현 요구사항:**
 
 - `rc.add_data('size', expr)`: Expression을 평가하고 `rc.db.assign({'size': result})`로 data_vars에 추가
-- `rc.axis.size['small']`: 
-  1. `AxisAccessor`가 `rc.db['size']`에 접근
-  2. `AxisSelector.__getitem__('small')`이 `(rc.db['size'] == 'small')`을 반환
-  3. 표준 xarray 불리언 인덱싱, Expression 생성 없음
-- `rc[mask] = value`: `xr.where(mask, value, rc.db[current_canvas])`로 할당
+- `rc.data['size'] == 'small'`:
+  1. `rc.data['size']` → `Field('size')` Expression 반환
+  2. `Field('size') == 'small'` → `Equals(Field('size'), 'small')` Expression 반환
+  3. Expression은 lazy하게 유지, `rc.evaluate(expr)`로 평가
+- `rc[mask] = value`: `xr.where(mask, value, rc.db[current_canvas])`로 할당 (미구현)
 
 ### 3.2.4. Interface C: Selective Traceability (Integer-Based Steps)
 
@@ -255,6 +481,452 @@ pnl_step4 = rc.trace_pnl('combo', step=4)  # 최종 결과
   - `step=None`: 모든 단계의 캐시 데이터를 `PnLTracer`에 전달
   - `step=1`: 해당 단계만 전달
 - `rc.get_intermediate(var, step)`: `rc._evaluator.cache[var][step][1]` 반환 (DataArray 부분)
+
+#### Dual-Cache for Weight Tracking ✅ **IMPLEMENTED**
+
+**Phase 16에서 추가된 기능**: Weight scaling이 Visitor 캐싱에 통합되었습니다.
+
+**설계 철학**:
+- **Every step scaled**: 모든 연산 단계에서 signal과 weight를 동시 캐싱
+- **Scaler in evaluate()**: `rc.evaluate(expr, scaler=...)` API로 on-the-fly 스케일러 교체
+- **Separate caches**: Signal 캐시는 영속적, weight 캐시는 갱신 가능
+- **Research-friendly**: 동일 signal에 여러 스케일링 전략 쉽게 비교
+
+**기본 사용법**:
+
+```python
+from alpha_canvas.core.expression import Field
+from alpha_canvas.ops.timeseries import TsMean
+from alpha_canvas.ops.crosssection import Rank
+from alpha_canvas.portfolio.strategies import DollarNeutralScaler, GrossNetScaler
+
+# Step 1: Weight scaling과 함께 평가
+expr = Rank(TsMean(Field('returns'), window=5))
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+# Step 2: Signal 캐시 접근 (영속적)
+for step in range(len(rc._evaluator._signal_cache)):
+    name, signal = rc._evaluator.get_cached_signal(step)
+    print(f"Step {step}: {name}, shape={signal.shape}")
+    print(f"  Signal stats: mean={signal.mean():.4f}, std={signal.std():.4f}")
+
+# Step 3: Weight 캐시 접근 (조건부)
+for step in range(len(rc._evaluator._weight_cache)):
+    name, weights = rc._evaluator.get_cached_weights(step)
+    if weights is not None:
+        long_sum = weights.where(weights > 0, 0.0).sum(dim='asset').mean()
+        short_sum = weights.where(weights < 0, 0.0).sum(dim='asset').mean()
+        gross = abs(weights).sum(dim='asset').mean()
+        net = weights.sum(dim='asset').mean()
+        
+        print(f"Step {step}: {name}")
+        print(f"  Long: {long_sum:.4f}, Short: {short_sum:.4f}")
+        print(f"  Gross: {gross:.4f}, Net: {net:.4f}")
+```
+
+**편의 메서드**:
+
+```python
+# rc.get_weights() 편의 메서드 사용
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+# 특정 step의 weight 조회
+weights_step_0 = rc.get_weights(0)  # Field('returns') weights
+weights_step_1 = rc.get_weights(1)  # TsMean result weights
+weights_step_2 = rc.get_weights(2)  # Rank result weights
+
+# Validation
+print(f"Final weights shape: {weights_step_2.shape}")
+print(f"Final gross exposure: {abs(weights_step_2).sum(dim='asset').mean():.2f}")
+print(f"Final net exposure: {weights_step_2.sum(dim='asset').mean():.2f}")
+```
+
+**효율적인 Scaler 교체**:
+
+```python
+# 초기 평가 with DollarNeutralScaler
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+weights_neutral = rc.get_weights(2)  # Final step weights
+
+# Scaler 교체 (Signal 캐시 재사용!)
+result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.3))
+weights_long_bias = rc.get_weights(2)  # Final step weights
+
+# 비교
+print("Dollar Neutral:")
+print(f"  Net: {weights_neutral.sum(dim='asset').mean():.4f}")  # ~0.0
+
+print("Net Long Bias:")
+print(f"  Net: {weights_long_bias.sum(dim='asset').mean():.4f}")  # ~0.3
+
+# 핵심: Signal은 재평가하지 않음 (효율적!)
+# Weight만 재계산됨
+```
+
+**캐시 구조**:
+
+```python
+# EvaluateVisitor 내부 구조
+class EvaluateVisitor:
+    def __init__(self, ...):
+        # Dual-cache architecture
+        self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}  # 영속적
+        self._weight_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # 갱신 가능
+        self._scaler: Optional[WeightScaler] = None  # 현재 scaler
+        self._step_counter = 0
+    
+    def evaluate(self, expr, scaler: Optional[WeightScaler] = None):
+        """Evaluate with optional weight caching."""
+        # scaler가 변경되면 weight_cache만 재설정
+        # signal_cache는 항상 새로 평가 (but same scaler → reuse)
+        ...
+    
+    def recalculate_weights_with_scaler(self, scaler: WeightScaler):
+        """Signal 캐시 재사용, weight만 재계산 (on-demand 전략 비교용)."""
+        self._scaler = scaler
+        self._weight_cache = {}
+        
+        for step_idx in sorted(self._signal_cache.keys()):
+            name, signal = self._signal_cache[step_idx]
+            try:
+                weights = scaler.scale(signal)
+                self._weight_cache[step_idx] = (name, weights)
+            except Exception:
+                self._weight_cache[step_idx] = (name, None)
+```
+
+**설계 근거**:
+
+1. **Every step scaled**: 
+   - PnL 분석을 위해 각 연산 단계의 영향을 추적 가능
+   - 어느 연산자가 성능에 기여/악화시키는지 파악
+
+2. **Scaler in evaluate()**:
+   - 스케일링 전략을 런타임에 쉽게 교체
+   - 동일 Expression에 여러 전략 비교 (연구 워크플로우)
+
+3. **Separate caches**:
+   - Signal 캐시: 영속적 (scaler 변경 시에도 유지)
+   - Weight 캐시: 갱신 가능 (scaler 변경 시 재계산)
+   - 효율성: Signal 재평가 회피
+
+4. **No backward compat 필요**:
+   - MVP 개발 단계에서 clean design 우선
+   - Weight 캐시가 None이면 scaler가 지정 안 된 것
+
+**미래 확장: On-Demand Weight Recalculation**:
+
+```python
+# 현재는 evaluate() 호출 시마다 signal도 재평가
+# 미래 최적화: signal 캐시가 있으면 재사용하고 weight만 재계산
+
+# Option 1: 현재 방식 (매번 재평가)
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())  # Signal + Weight 계산
+result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.3))  # Signal 재평가 + Weight 계산
+
+# Option 2: 미래 최적화 (signal 캐시 재사용)
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())  # Signal + Weight 계산
+rc._evaluator.recalculate_weights_with_scaler(GrossNetScaler(2.0, 0.3))  # Weight만 재계산
+weights_new = rc.get_weights(2)  # 새로운 weight 조회
+
+# 현재는 evaluate()가 항상 signal 재평가하지만,
+# 미래에는 signal 캐시가 valid하면 재사용 가능
+```
+
+**Performance Impact**:
+
+- **Signal 평가**: 변경 없음 (기존 성능 유지)
+- **Weight 계산**: Step당 7-40ms (Phase 15 검증)
+- **Scaler 교체**: Signal 캐시 재사용 시 weight 계산만 (매우 효율적)
+- **메모리**: 2배 캐시 (signal + weight), 하지만 PnL 분석 가치가 cost 상회
+
+**Use Cases**:
+
+1. **Step-by-step PnL decomposition**:
+   ```python
+   for step in range(num_steps):
+       signal = rc._evaluator.get_cached_signal(step)[1]
+       weights = rc.get_weights(step)
+       if weights is not None:
+           # Calculate PnL for this step
+           step_pnl = (weights * returns.shift(time=1)).sum(dim='asset')
+           print(f"Step {step} PnL: {step_pnl.sum().values:.2f}")
+   ```
+
+2. **Scaling strategy comparison**:
+   ```python
+   strategies = {
+       'neutral': DollarNeutralScaler(),
+       'long_10pct': GrossNetScaler(2.0, 0.2),
+       'long_only': LongOnlyScaler(1.0)
+   }
+   
+   for name, scaler in strategies.items():
+       result = rc.evaluate(expr, scaler=scaler)
+       weights = rc.get_weights(-1)  # Final step
+       # Compare performance metrics
+   ```
+
+3. **Attribution analysis**:
+   - Signal generation (연산자들의 기여)
+   - Weight scaling (스케일링 전략의 영향)
+   - 각각의 PnL 기여도 분리 분석
+
+#### Triple-Cache for Backtesting ✅ **IMPLEMENTED**
+
+**Phase 17에서 추가된 기능**: Portfolio return computation이 triple-cache에 통합되었습니다.
+
+**설계 철학**:
+- **Automatic execution**: Scaler 제공 시 백테스트 자동 실행
+- **Position-level returns**: `(T, N)` shape 보존으로 winner/loser 분석 가능
+- **Shift-mask workflow**: Forward-looking bias 방지, NaN pollution 방지
+- **On-demand aggregation**: Daily/cumulative PnL은 필요 시 계산
+
+**Return Data Auto-Loading**:
+
+```python
+# config/data.yaml에 'returns' 필드 필수 정의
+returns:
+  db_type: parquet
+  table: PRICEVOLUME
+  index_col: date
+  security_col: security_id
+  value_col: return
+  query: >
+    SELECT date, security_id, return 
+    FROM read_parquet('data/fake/pricevolume.parquet')
+    WHERE date >= :start_date AND date <= :end_date
+
+# AlphaCanvas 초기화 시 자동 로드
+rc = AlphaCanvas(start_date='2024-01-01', end_date='2024-12-31')
+# 내부적으로 _load_returns_data() 호출
+# rc._returns에 저장, rc._evaluator._returns_data에 전달
+```
+
+**기본 사용법**:
+
+```python
+from alpha_canvas.core.expression import Field
+from alpha_canvas.ops.timeseries import TsMean
+from alpha_canvas.ops.crosssection import Rank
+from alpha_canvas.portfolio.strategies import DollarNeutralScaler
+
+# Step 1: Scaler와 함께 평가 (백테스트 자동 실행)
+expr = Rank(TsMean(Field('price'), window=5))
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+# Step 2: Position-level returns 접근 (winner/loser 분석)
+port_return = rc.get_port_return(step=2)  # (T, N) shape
+total_contrib = port_return.sum(dim='time')
+best_stock = total_contrib.argmax(dim='asset')
+worst_stock = total_contrib.argmin(dim='asset')
+
+print(f"Best performer: {assets[best_stock]}")
+print(f"Worst performer: {assets[worst_stock]}")
+
+# Step 3: Daily PnL 및 성과 지표
+daily_pnl = rc.get_daily_pnl(step=2)  # (T,) aggregated
+mean_pnl = daily_pnl.mean().values
+std_pnl = daily_pnl.std().values
+sharpe = mean_pnl / std_pnl * np.sqrt(252)
+
+print(f"Mean daily PnL: {mean_pnl:.6f}")
+print(f"Sharpe ratio: {sharpe:.2f}")
+
+# Step 4: Cumulative PnL (cumsum 사용)
+cum_pnl = rc.get_cumulative_pnl(step=2)
+final_pnl = cum_pnl.isel(time=-1).values
+
+print(f"Final cumulative PnL: {final_pnl:.6f}")
+```
+
+**Shift-Mask Workflow (Forward-Bias Prevention)**:
+
+```python
+# 내부 구현 (_compute_portfolio_returns):
+def _compute_portfolio_returns(self, weights: xr.DataArray) -> xr.DataArray:
+    # Step 1: Shift weights (어제의 signal로 오늘 거래)
+    weights_shifted = weights.shift(time=1)
+    
+    # Step 2: Re-mask with current universe (중요! NaN pollution 방지)
+    if self._universe_mask is not None:
+        final_weights = weights_shifted.where(self._universe_mask)
+    else:
+        final_weights = weights_shifted
+    
+    # Step 3: Mask returns
+    if self._universe_mask is not None:
+        returns_masked = self._returns_data.where(self._universe_mask)
+    else:
+        returns_masked = self._returns_data
+    
+    # Step 4: Element-wise multiply (shape (T, N) 보존!)
+    port_return = final_weights * returns_masked
+    
+    return port_return  # 즉시 집계하지 않음
+```
+
+**Re-Masking의 중요성**:
+
+```python
+# 문제 상황:
+# - 종목이 universe에서 퇴출 → weight가 NaN
+# - NaN * return = NaN → daily PnL도 NaN (pollution)
+
+# 해결책: Shift 후 현재 universe로 re-mask
+# - 퇴출된 종목의 포지션 청산
+# - NaN pollution 방지
+# - PnL 계산 정상 작동
+
+# Example:
+# t=0: Stock A in universe, weight=0.5
+# t=1: Stock A exits universe
+# Without re-mask: weight[t=1] = 0.5 (shifted) → NaN * return → NaN
+# With re-mask: weight[t=1] = NaN (liquidated) → sum(skipna=True) → valid PnL
+```
+
+**Efficient Scaler Comparison**:
+
+```python
+# 초기 평가
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+pnl1 = rc.get_cumulative_pnl(2).isel(time=-1).values
+
+# Scaler 교체 (Signal 캐시 재사용!)
+result = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.5))
+pnl2 = rc.get_cumulative_pnl(2).isel(time=-1).values
+
+print(f"Dollar Neutral PnL: {pnl1:.6f}")
+print(f"Net Long Bias PnL: {pnl2:.6f}")
+
+# 핵심: Signal 재평가 없음, weight와 port_return만 재계산 (효율적!)
+```
+
+**캐시 구조 (Triple-Cache)**:
+
+```python
+class EvaluateVisitor:
+    def __init__(self, ...):
+        # Triple-cache architecture
+        self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}  # 영속적
+        self._weight_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # 갱신 가능
+        self._port_return_cache: Dict[int, Tuple[str, Optional[xr.DataArray]]] = {}  # 갱신 가능 (NEW!)
+        
+        self._returns_data: Optional[xr.DataArray] = None  # Return data (필수)
+        self._scaler: Optional[WeightScaler] = None
+        self._step_counter = 0
+```
+
+**On-Demand Aggregation**:
+
+```python
+# Position-level returns은 항상 (T, N) shape으로 캐싱
+# Daily/cumulative PnL은 필요 시 on-demand 계산 (빠름, <1ms)
+
+def get_daily_pnl(self, step: int) -> Optional[xr.DataArray]:
+    port_return = self.get_port_return(step)
+    if port_return is None:
+        return None
+    # On-demand aggregation
+    daily_pnl = port_return.sum(dim='asset')  # (T,)
+    return daily_pnl
+
+def get_cumulative_pnl(self, step: int) -> Optional[xr.DataArray]:
+    daily_pnl = self.get_daily_pnl(step)
+    if daily_pnl is None:
+        return None
+    # Cumsum (not cumprod) for time-invariance
+    cumulative_pnl = daily_pnl.cumsum(dim='time')
+    return cumulative_pnl
+```
+
+**Cumsum vs Cumprod**:
+
+```python
+# Cumsum: Time-invariant (공정한 전략 비교)
+returns_example = [0.02, 0.03, -0.01]
+cumsum_result = sum(returns_example)  # 0.04 (순서 무관)
+
+# Cumprod: Time-dependent (긴 전략에 유리, 불공정)
+cumprod_result = (1.02 * 1.03 * 0.99) - 1  # 0.0405 (복리 효과)
+
+# 선택: Cumsum을 기본 메트릭으로 사용
+# → 연구 목적의 공정한 비교
+```
+
+**Step-by-Step PnL Decomposition**:
+
+```python
+# 각 연산 step별 PnL 비교 (어느 연산자가 성능에 기여/악화?)
+expr = Rank(TsMean(Field('price'), window=5))
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+for step in range(len(rc._evaluator._signal_cache)):
+    signal_name, _ = rc._evaluator.get_cached_signal(step)
+    cum_pnl = rc.get_cumulative_pnl(step)
+    
+    if cum_pnl is not None:
+        final_pnl = cum_pnl.isel(time=-1).values
+        print(f"Step {step} ({signal_name}): PnL = {final_pnl:+.6f}")
+
+# Example output:
+# Step 0 (Field_price): PnL = -0.101889
+# Step 1 (TsMean): PnL = -0.051532
+# Step 2 (Rank): PnL = -0.054569
+# → TsMean이 성능을 개선했지만, Rank가 약간 악화시킴
+```
+
+**Winner/Loser Attribution Analysis**:
+
+```python
+# Position-level returns을 활용한 기여도 분석
+port_return = rc.get_port_return(final_step)
+
+# 종목별 총 기여도
+total_contrib = port_return.sum(dim='time')
+
+# Top/Bottom 종목 식별
+sorted_contrib = total_contrib.sortby(total_contrib, ascending=False)
+
+print("Top 5 Contributors:")
+for i in range(5):
+    asset = sorted_contrib.asset.values[i]
+    contrib = sorted_contrib.sel(asset=asset).values
+    print(f"  {i+1}. {asset}: {contrib:+.6f}")
+
+print("\nBottom 5 Contributors:")
+for i in range(-5, 0):
+    asset = sorted_contrib.asset.values[i]
+    contrib = sorted_contrib.sel(asset=asset).values
+    print(f"  {i+6}. {asset}: {contrib:+.6f}")
+```
+
+**Performance Impact**:
+
+- **Return loading**: ~5ms per field (같은 Parquet 로드 성능)
+- **Portfolio return computation**: ~7ms for (252, 100) dataset (Experiment 19)
+- **Daily PnL aggregation**: <1ms (on-demand)
+- **Cumulative PnL**: <1ms (on-demand cumsum)
+- **메모리**: 3배 캐시 (signal + weight + port_return), 하지만 position-level 분석 가치 높음
+
+**Design Rationale**:
+
+1. **Position-level caching**: 
+   - Winner/loser 분석을 위해 (T, N) shape 보존 필수
+   - 종목별 기여도, factor 검증에 critical
+   
+2. **On-demand aggregation**:
+   - Daily/cumulative PnL은 빠름 (<1ms)
+   - 캐싱 불필요, 메모리 절약
+   
+3. **Shift-mask workflow**:
+   - Forward-bias 방지 (realistic backtest)
+   - Re-masking으로 NaN pollution 방지
+   
+4. **Triple-cache efficiency**:
+   - Scaler 교체 시 signal 재사용
+   - Weight와 port_return만 재계산
+   - 전략 비교 효율적
 
 ### 3.2.5. 핵심 활용 패턴: 팩터 수익률 계산
 
@@ -361,149 +1033,1026 @@ multi_returns = rc.trace_pnl('multi_factor')
 - 듀얼 인터페이스(Formula + Selector)의 조합으로 복잡한 다차원 팩터 포트폴리오를 간결하게 표현합니다.
 - 레이블 기반 선택(`'small'`, `'q5'`, `'high'`)으로 가독성과 유지보수성을 확보합니다.
 
-## 3.3. Cross-Sectional Quantile 연산자 구현
+## 3.3. 연산자 구현 패턴 (Operator Implementation Pattern)
 
-### 3.3.1. `cs_quantile` Expression 클래스
+### 3.3.1. 책임 분리 원칙
+
+**핵심 원칙:** 연산자는 자신의 계산 로직을 소유하고, Visitor는 순회 및 캐싱만 담당합니다.
+
+**잘못된 패턴 (Anti-Pattern):**
 
 ```python
-from dataclasses import dataclass
-from typing import Optional, List, Union
-
-@dataclass
-class CsQuantile(Expression):
-    """Cross-sectional quantile bucketing with optional grouping or masking."""
-    
-    data: Expression  # 버킷화할 데이터 (e.g., Field('market_cap'))
-    bins: int  # 버킷 개수
-    labels: List[str]  # 레이블 리스트 (길이 = bins)
-    group_by: Optional[str] = None  # 종속 정렬용: axis 이름 (string), pandas.groupby처럼
-    mask: Optional[Expression] = None  # 로우레벨 필터링용: Boolean Expression
-    
-    def accept(self, visitor: Visitor):
-        return visitor.visit_cs_quantile(self)
+# ❌ BAD: Visitor가 계산 로직을 포함
+class EvaluateVisitor:
+    def visit_ts_mean(self, node):
+        child_result = node.child.accept(self)
+        # Visitor 안에 rolling 계산 로직이 들어감 (잘못됨!)
+        result = child_result.rolling(time=node.window, min_periods=node.window).mean()
+        self._cache_result("TsMean", result)
+        return result
 ```
 
-### 3.3.2. `EvaluateVisitor.visit_cs_quantile` 구현
+**올바른 패턴 (Correct Pattern):**
 
 ```python
-def visit_cs_quantile(self, node: CsQuantile) -> xr.DataArray:
-    """
-    cs_quantile 평가: 독립/종속 정렬 및 마스크 지원.
+# ✅ GOOD: 연산자가 계산 로직을 소유
+@dataclass
+class TsMean(Expression):
+    child: Expression
+    window: int
     
-    중요: 종속 정렬은 xarray.groupby().apply()의 표준 패턴을 사용합니다.
-    """
+    def accept(self, visitor):
+        """Visitor 인터페이스: 순회를 위한 진입점"""
+        return visitor.visit_ts_mean(self)
     
-    # 1. 데이터 평가 및 타입 검사 (MVP: DataPanel만 허용)
-    data = node.data.accept(self)  # (T, N) DataArray
-    if not self._is_data_panel(data):
-        raise TypeError(f"cs_quantile requires DataPanel, got {type(data)}")
-    
-    # 2. 마스크 처리 (옵션)
-    if node.mask is not None:
-        mask = node.mask.accept(self)  # (T, N) Boolean
-        data = data.where(mask, np.nan)  # mask=False인 곳은 NaN
-    
-    # 3-A. 독립 정렬 (group_by=None)
-    if node.group_by is None:
-        return self._quantile_independent(data, node.bins, node.labels)
-    
-    # 3-B. 종속 정렬 (group_by 지정 - xarray.groupby 활용)
-    else:
-        # group_by는 문자열 (axis 이름)
-        group_labels = self._rc.db[node.group_by]  # rc.db에서 직접 조회
-        return self._quantile_grouped(data, group_labels, node.bins, node.labels)
+    def compute(self, child_result: xr.DataArray) -> xr.DataArray:
+        """핵심 계산 로직: 연산자가 소유"""
+        return child_result.rolling(
+            time=self.window,
+            min_periods=self.window
+        ).mean()
 
-def _quantile_independent(self, data: xr.DataArray, bins: int, labels: List[str]) -> xr.DataArray:
-    """전체 유니버스에서 quantile 계산."""
-    # xarray의 quantile 기능 활용하여 각 time step별로 cross-sectional quantile 계산
-    # pd.qcut 스타일로 bins 개로 분할하고 labels 할당
-    # 반환: (T, N) Categorical DataArray
-    ...
+# ✅ GOOD: Visitor는 순회 및 캐싱만 담당
+class EvaluateVisitor:
+    def visit_ts_mean(self, node: TsMean) -> xr.DataArray:
+        """트리 순회 및 상태 수집"""
+        # 1. 순회: 자식 노드 평가
+        child_result = node.child.accept(self)
+        
+        # 2. 계산 위임: 연산자에게 맡김
+        result = node.compute(child_result)
+        
+        # 3. 상태 수집: 결과 캐싱
+        self._cache_result("TsMean", result)
+        
+        return result
+```
 
-def _quantile_grouped(self, data: xr.DataArray, groups: xr.DataArray, 
-                      bins: int, labels: List[str]) -> xr.DataArray:
+### 3.3.2. 연산자 구현 체크리스트
+
+모든 연산자는 다음 구조를 따라야 합니다:
+
+```python
+@dataclass
+class OperatorName(Expression):
+    """연산자 설명.
+    
+    Args:
+        child: 자식 Expression (필요시)
+        param1: 연산자 파라미터 1
+        param2: 연산자 파라미터 2
+    
+    Returns:
+        연산 결과 DataArray
     """
-    각 그룹 내에서 독립적으로 quantile 계산 (xarray.groupby 활용).
+    child: Expression  # 자식 노드 (있는 경우)
+    param1: type1      # 연산자 파라미터들
+    param2: type2
     
-    이것이 xarray.groupby().apply()의 표준 사용 패턴입니다.
+    def accept(self, visitor) -> xr.DataArray:
+        """Visitor 인터페이스."""
+        return visitor.visit_operator_name(self)
+    
+    def compute(self, *inputs: xr.DataArray) -> xr.DataArray:
+        """핵심 계산 로직.
+        
+        Args:
+            *inputs: 자식 노드들의 평가 결과
+        
+        Returns:
+            이 연산의 결과 DataArray
+        
+        Note:
+            이 메서드는 순수 함수여야 합니다 (부작용 없음).
+            Visitor 참조 없이 독립적으로 테스트 가능해야 합니다.
+        """
+        # 실제 계산 로직
+        result = ...  # xarray/numpy 연산
+        return result
+```
+
+**체크리스트:**
+
+- [ ] `accept()` 메서드: Visitor 인터페이스 제공
+- [ ] `compute()` 메서드: 핵심 계산 로직 캡슐화
+- [ ] `compute()`는 순수 함수 (부작용 없음)
+- [ ] `compute()`는 Visitor 독립적 (직접 테스트 가능)
+- [ ] Docstring으로 Args/Returns 명확히 문서화
+
+### 3.3.3. Visitor 구현 패턴
+
+모든 `visit_*()` 메서드는 동일한 3단계 패턴을 따릅니다:
+
+```python
+def visit_operator_name(self, node: OperatorName) -> xr.DataArray:
+    """연산자 노드 방문: 순회 및 캐싱.
+    
+    Args:
+        node: 연산자 Expression 노드
+    
+    Returns:
+        연산 결과 DataArray
     """
+    # 1️⃣ 순회(Traversal): 자식 노드들 평가
+    child_result_1 = node.child1.accept(self)  # 깊이 우선
+    child_result_2 = node.child2.accept(self)  # (있는 경우)
     
-    def quantile_function(group_data: xr.DataArray) -> xr.DataArray:
-        """각 그룹에 적용할 quantile 함수"""
-        # group_data는 해당 그룹('small' 또는 'big')에 속하는 데이터만 포함
-        return self._quantile_independent(group_data, bins, labels)
+    # 2️⃣ 계산 위임(Delegation): 연산자에게 맡김
+    result = node.compute(child_result_1, child_result_2)
     
-    # xarray.groupby().apply() - 표준 패턴
-    result = data.groupby(groups).apply(quantile_function)
+    # 3️⃣ 상태 수집(State Collection): 결과 캐싱
+    self._cache_result("OperatorName", result)
     
     return result
 ```
 
-**핵심 구현 사항:**
+**Visitor의 역할:**
 
-1. **타입 검사:** MVP에서는 `DataPanel` 타입만 허용 (`_is_data_panel()` 헬퍼 사용)
-2. **독립 정렬:** 전체 유니버스 대상 quantile 계산
-3. **종속 정렬:** `xarray.groupby().apply(quantile_function)` 사용
-   - `group_by`는 문자열로 받아 `rc.db[group_by]`에서 레이블 조회
-   - `.apply()`에 커스텀 quantile 함수 전달
-   - xarray가 자동으로 그룹별 결과를 병합
-4. **마스크:** `data.where(mask, np.nan)`로 필터링
+- ✅ **트리 순회:** 깊이 우선으로 자식 노드 방문
+- ✅ **계산 위임:** `node.compute()`로 계산 맡김
+- ✅ **상태 수집:** 중간 결과를 정수 스텝으로 캐싱
+- ❌ **계산 로직 포함 금지:** rolling, rank, quantile 등의 로직은 연산자에 속함
 
-### 3.3.3. 사용 예시 비교
+### 3.3.4. 테스트 전략
+
+**1. 연산자 단위 테스트 (Operator Unit Tests):**
 
 ```python
-# 독립 정렬: 간단한 Expression
+def test_ts_mean_compute_directly():
+    """TsMean.compute() 메서드를 직접 테스트 (Visitor 없이)."""
+    # 입력 데이터 준비
+    data = xr.DataArray(
+        [[1, 2], [3, 4], [5, 6]],
+        dims=['time', 'asset']
+    )
+    
+    # 연산자 생성
+    operator = TsMean(child=Field('dummy'), window=2)
+    
+    # compute() 직접 호출 (Visitor 우회)
+    result = operator.compute(data)
+    
+    # 검증
+    assert np.isnan(result.values[0, 0])  # 첫 행 NaN
+    assert result.values[1, 0] == 2.0     # mean([1, 3])
+```
+
+**2. 통합 테스트 (Integration Tests):**
+
+```python
+def test_ts_mean_with_visitor():
+    """TsMean이 Visitor와 통합되어 작동하는지 테스트."""
+    ds = xr.Dataset({'returns': data})
+    visitor = EvaluateVisitor(ds)
+    
+    expr = TsMean(child=Field('returns'), window=3)
+    result = visitor.evaluate(expr)
+    
+    # 캐싱 검증
+    assert len(visitor._cache) == 2  # Field + TsMean
+```
+
+### 3.3.5. 이점 요약
+
+| 측면 | 잘못된 패턴 | 올바른 패턴 |
+|------|-------------|-------------|
+| **책임** | Visitor가 모든 계산 담당 | 연산자가 자신의 계산 소유 |
+| **테스트** | Visitor를 통해서만 테스트 | `compute()` 직접 테스트 가능 |
+| **유지보수** | Visitor가 비대해짐 | 각 연산자 독립적 |
+| **확장성** | 새 연산자마다 Visitor 수정 | Visitor 수정 최소화 |
+| **단일 책임** | Visitor가 다중 책임 | 각 클래스 단일 책임 |
+
+---
+
+## 3.4. Cross-Sectional Quantile 연산자 구현 ✅ **IMPLEMENTED**
+
+### 3.4.1. `CsQuantile` Expression 클래스 (실제 구현)
+
+```python
+from dataclasses import dataclass
+from typing import List, Optional
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+@dataclass(eq=False)  # eq=False to preserve Expression comparison operators
+class CsQuantile(Expression):
+    """Cross-sectional quantile bucketing - returns categorical labels.
+    
+    Preserves input (T, N) shape. Each timestep is independently bucketed.
+    Supports both independent sort (whole universe) and dependent sort
+    (within groups via group_by parameter).
+    """
+    child: Expression  # 버킷화할 데이터 (e.g., Field('market_cap'))
+    bins: int  # 버킷 개수
+    labels: List[str]  # 레이블 리스트 (길이 = bins)
+    group_by: Optional[str] = None  # 종속 정렬용: field 이름 (string)
+    
+    def __post_init__(self):
+        """Validate parameters."""
+        if len(self.labels) != self.bins:
+            raise ValueError(
+                f"labels length ({len(self.labels)}) must equal bins ({self.bins})"
+            )
+    
+    def accept(self, visitor):
+        """Visitor 인터페이스."""
+        return visitor.visit_operator(self)
+    
+    def compute(
+        self, 
+        child_result: xr.DataArray, 
+        group_labels: Optional[xr.DataArray] = None
+    ) -> xr.DataArray:
+        """Apply quantile bucketing - 핵심 계산 로직."""
+        if group_labels is None:
+            return self._quantile_independent(child_result)
+        else:
+            return self._quantile_grouped(child_result, group_labels)
+```
+
+### 3.4.2. 독립 정렬 (Independent Sort) 구현
+
+**핵심 패턴:** `xarray.groupby('time').map()` + `pd.qcut` + **flatten-reshape**
+
+```python
+def _quantile_independent(self, data: xr.DataArray) -> xr.DataArray:
+    """Independent sort - qcut at each timestep across all assets.
+    
+    핵심: pd.qcut은 1D 입력이 필요하므로 flatten → qcut → reshape 패턴 사용
+    """
+    def qcut_at_timestep(data_slice):
+        """Apply pd.qcut to a single timestep's cross-section."""
+        try:
+            # CRITICAL: Flatten to 1D for pd.qcut
+            values_1d = data_slice.values.flatten()
+            result = pd.qcut(
+                values_1d, 
+                q=self.bins, 
+                labels=self.labels, 
+                duplicates='drop'  # Handle edge cases gracefully
+            )
+            # CRITICAL: Reshape back to original shape
+            result_array = np.array(result).reshape(data_slice.shape)
+            return xr.DataArray(
+                result_array, 
+                dims=data_slice.dims, 
+                coords=data_slice.coords
+            )
+        except Exception:
+            # Edge case: all same values, all NaN, etc.
+            return xr.DataArray(
+                np.full_like(data_slice.values, np.nan, dtype=object),
+                dims=data_slice.dims, 
+                coords=data_slice.coords
+            )
+    
+    # xarray.groupby('time').map() automatically concatenates back to (T, N)
+    result = data.groupby('time').map(qcut_at_timestep)
+    return result
+```
+
+### 3.4.3. 종속 정렬 (Dependent Sort) 구현
+
+**핵심 패턴:** 중첩된 groupby (groups → time → qcut)
+
+```python
+def _quantile_grouped(
+    self, 
+    data: xr.DataArray, 
+    groups: xr.DataArray
+) -> xr.DataArray:
+    """Dependent sort - qcut within each group at each timestep.
+    
+    Nested groupby pattern:
+    1. Group by categorical labels (e.g., 'small', 'big')
+    2. Within each group, apply independent sort (group by time → qcut)
+    3. xarray automatically concatenates results back to (T, N) shape
+    """
+    def apply_qcut_within_group(group_data: xr.DataArray) -> xr.DataArray:
+        """Apply qcut at each timestep within this group."""
+        return self._quantile_independent(group_data)
+    
+    # Nested groupby: groups → time → qcut
+    # xarray automatically concatenates results back
+    result = data.groupby(groups).map(apply_qcut_within_group)
+    return result
+```
+
+### 3.4.4. Visitor 통합 (Special Case Handling)
+
+**CsQuantile은 `visit_operator()`에서 특별 처리 필요 (group_by 조회)**:
+
+```python
+# In EvaluateVisitor.visit_operator()
+from alpha_canvas.ops.classification import CsQuantile
+
+# Special handling for CsQuantile (needs group_by lookup)
+if isinstance(node, CsQuantile):
+    # 1. Evaluate child
+    child_result = node.child.accept(self)
+    
+    # 2. Look up group_by field if specified
+    group_labels = None
+    if node.group_by is not None:
+        if node.group_by not in self._data:
+            raise ValueError(
+                f"group_by field '{node.group_by}' not found in dataset"
+            )
+        group_labels = self._data[node.group_by]
+    
+    # 3. Delegate to compute()
+    result = node.compute(child_result, group_labels)
+    
+    # 4. Apply universe masking (automatic)
+    if self._universe_mask is not None:
+        result = result.where(self._universe_mask, np.nan)
+    
+    # 5. Cache
+    self._cache_result("CsQuantile", result)
+    return result
+```
+
+### 3.4.5. 핵심 구현 교훈 (실험에서 발견)
+
+**1. Flatten-Reshape 패턴 필수:**
+- `pd.qcut`은 1D 배열만 받음
+- `data_slice.values.flatten()` → qcut → `reshape(data_slice.shape)`
+- 이 패턴 없이는 shape 보존 불가능
+
+**2. xarray.groupby().map() vs .apply():**
+- `.map()`이 xarray → xarray 변환에 더 깔끔
+- 자동 concatenation으로 shape 보존
+- `.apply()`도 작동하지만 pandas 반환 시 사용
+
+**3. duplicates='drop' 필수:**
+- 모든 값이 동일한 edge case 처리
+- 모든 NaN인 경우 graceful degradation
+- 에러 발생 대신 NaN 반환
+
+**4. 종속 정렬 성능:**
+- 독립 정렬: ~27ms for (10, 6) data
+- 종속 정렬: ~117ms for (10, 6) data (4.26x overhead)
+- **허용 가능:** 팩터 연구는 배치 처리 (실시간 아님)
+
+**5. 검증 방법:**
+- 독립 vs 종속 정렬의 cutoff가 **달라야 함**
+- 실험에서 17%의 positions가 다른 label 받음
+- Fama-French 논문 methodology와 일치
+
+### 3.4.6. 사용 예시 (실제 코드)
+
+```python
+from alpha_canvas.ops.classification import CsQuantile
+from alpha_canvas.core.expression import Field
+
+# 독립 정렬: 전체 유니버스에서 quantile
 size_expr = CsQuantile(
-    data=Field('market_cap'),
+    child=Field('market_cap'),
     bins=2,
     labels=['small', 'big']
 )
 
-# 종속 정렬: group_by로 기존 axis 참조
+# 종속 정렬: size 그룹 내에서 value quantile (Fama-French)
 value_expr = CsQuantile(
-    data=Field('book_to_market'),
+    child=Field('book_to_market'),
     bins=3,
     labels=['low', 'mid', 'high'],
-    group_by='size'  # 'size' axis의 결과를 먼저 평가 → 각 그룹별 quantile
+    group_by='size'  # 'size' field를 먼저 조회 → 각 그룹별 quantile
 )
 
-# 마스크 적용: Boolean Expression
-momentum_expr = CsQuantile(
-    data=Field('returns'),
-    bins=5,
-    labels=['q1', 'q2', 'q3', 'q4', 'q5'],
-    mask=GreaterThan(Field('volume'), Quantile(Field('volume'), 0.5))
-)
+# 사용
+rc.add_data('size', size_expr)  # 먼저 size 생성
+rc.add_data('value', value_expr)  # size 그룹 내에서 value 계산
+
+# Boolean Expression 통합
+small_value = (rc.data['size'] == 'small') & (rc.data['value'] == 'high')
 ```
 
-## 3.4. Property Accessor 구현
+## 3.4. Property Accessor 구현 ✅ **IMPLEMENTED**
 
 ```python
-# rc.data: DataAccessor
+from alpha_canvas.core.expression import Field
+
+
 class DataAccessor:
-    def __init__(self, db: xr.Dataset):
-        self._db = db
+    """Returns Field Expressions for lazy evaluation."""
     
-    def __getattr__(self, name: str) -> xr.DataArray:
-        if name in self._db:
-            return self._db[name]
-        raise AttributeError(f"Data '{name}' not found")
-
-# rc.axis: AxisAccessor
-class AxisAccessor:
-    def __init__(self, rc: 'AlphaCanvas'):
-        self._rc = rc
+    def __getitem__(self, field_name: str) -> Field:
+        """Return Field Expression (not raw data!)"""
+        if not isinstance(field_name, str):
+            raise TypeError(
+                f"Field name must be string, got {type(field_name).__name__}"
+            )
+        return Field(field_name)
     
-    def __getattr__(self, axis_name: str) -> 'AxisSelector':
-        if axis_name not in self._rc.rules:
-            raise AttributeError(f"Axis '{axis_name}' not defined")
-        return AxisSelector(self._rc, axis_name)
+    def __getattr__(self, name: str):
+        """Prevent attribute access - item access only."""
+        raise AttributeError(
+            f"DataAccessor does not support attribute access. "
+            f"Use rc.data['{name}'] instead of rc.data.{name}"
+        )
 
-class AxisSelector:
-    def __getitem__(self, label: str) -> xr.DataArray:
-        # rc.rules에서 Expression 조회 → Equals(..., label) 생성 → 평가
-        ...
+
+# AlphaCanvas 통합
+class AlphaCanvas:
+    def __init__(self, ...):
+        self._data_accessor = DataAccessor()
+    
+    @property
+    def data(self) -> DataAccessor:
+        """Access data fields as Field Expressions."""
+        return self._data_accessor
 ```
+
+**사용 예시**:
+
+```python
+# Basic field access
+field = rc.data['size']  # Returns Field('size')
+
+# Comparison creates Expression
+mask = rc.data['size'] == 'small'  # Returns Equals Expression
+
+# Evaluate
+result = rc.evaluate(mask)  # Boolean DataArray with universe masking
+```
+
+---
+
+## 3.4.2. Signal Assignment (Lazy Evaluation) ✅ **IMPLEMENTED**
+
+### 개요
+
+**Signal Assignment**는 Expression 객체에 값을 할당하여 시그널을 구성하는 기능입니다. Fama-French 팩터와 같은 복잡한 시그널을 직관적인 문법으로 생성할 수 있습니다.
+
+**핵심 설계 원칙**:
+- **Lazy Evaluation**: 할당은 저장만 하고 즉시 실행하지 않음
+- **Implicit Canvas**: 별도의 캔버스 생성 없이 Expression 결과가 캔버스 역할
+- **Traceability**: Base result와 final result를 별도로 캐싱하여 추적 가능
+- **DRY Principle**: Lazy initialization으로 모든 Expression에서 자동 작동
+
+### Expression.__setitem__ 구현 (DRY Lazy Initialization)
+
+```python
+class Expression(ABC):
+    """Base class for all Expressions.
+    
+    Supports lazy assignment via __setitem__:
+        signal[mask] = value  # Stores assignment, does not evaluate
+    """
+    
+    def __setitem__(self, mask, value):
+        """Store assignment for lazy evaluation.
+        
+        Uses lazy initialization - _assignments list is created on first use.
+        This follows the DRY principle: no __post_init__ needed in subclasses.
+        
+        Args:
+            mask: Boolean Expression or DataArray indicating where to assign
+            value: Scalar value to assign where mask is True
+        
+        Note:
+            Assignments are stored as (mask, value) tuples and applied sequentially
+            during evaluation. Later assignments overwrite earlier ones for overlapping
+            positions.
+        """
+        # Lazy initialization - create _assignments if it doesn't exist
+        if not hasattr(self, '_assignments'):
+            self._assignments = []
+        
+        self._assignments.append((mask, value))
+```
+
+**Lazy Initialization의 장점**:
+1. ✅ **No Boilerplate**: 모든 Expression 서브클래스에 `__post_init__` 불필요
+2. ✅ **DRY Principle**: 중복 코드 제거
+3. ✅ **Automatic**: 모든 Expression에서 자동으로 작동
+4. ✅ **Efficient**: 할당이 없으면 `_assignments` 속성도 생성되지 않음
+
+### Visitor Integration
+
+```python
+class EvaluateVisitor:
+    def evaluate(self, expr: Expression) -> xr.DataArray:
+        """Evaluate expression and apply assignments if present."""
+        # Step 1: Evaluate base expression (tree traversal)
+        base_result = expr.accept(self)
+        
+        # Step 2: Check if expression has assignments (lazy initialization)
+        assignments = getattr(expr, '_assignments', None)
+        if assignments:
+            # Cache base result for traceability
+            base_name = f"{expr.__class__.__name__}_base"
+            self._cache[self._step_counter] = (base_name, base_result)
+            self._step_counter += 1
+            
+            # Apply assignments sequentially
+            final_result = self._apply_assignments(base_result, assignments)
+            
+            # Apply universe masking to final result
+            if self._universe_mask is not None:
+                final_result = final_result.where(self._universe_mask)
+            
+            # Cache final result
+            final_name = f"{expr.__class__.__name__}_with_assignments"
+            self._cache[self._step_counter] = (final_name, final_result)
+            self._step_counter += 1
+            
+            return final_result
+        
+        # No assignments, return base result as-is
+        return base_result
+    
+    def _apply_assignments(self, base_result: xr.DataArray, assignments: list) -> xr.DataArray:
+        """Apply assignments sequentially to base result."""
+        result = base_result.copy(deep=True)
+        
+        for mask_expr, value in assignments:
+            # If mask is an Expression, evaluate it
+            if hasattr(mask_expr, 'accept'):
+                mask_data = mask_expr.accept(self)
+            else:
+                # Already a DataArray or numpy array
+                mask_data = mask_expr
+            
+            # Ensure mask is boolean (required for ~ operator)
+            mask_bool = mask_data.astype(bool)
+            
+            # Apply assignment: replace values where mask is True
+            result = result.where(~mask_bool, value)
+        
+        return result
+```
+
+### Constant Expression (Blank Canvas)
+
+```python
+from dataclasses import dataclass
+import numpy as np
+import xarray as xr
+from alpha_canvas.core.expression import Expression
+
+
+@dataclass(eq=False)
+class Constant(Expression):
+    """Expression that produces a constant-valued DataArray.
+    
+    Creates a universe-shaped (T, N) DataArray filled with the specified
+    constant value. Serves as a "blank canvas" for signal construction.
+    
+    Example:
+        >>> signal = Constant(0.0)  # Blank canvas (all zeros)
+        >>> signal[mask1] = 1.0     # Assign long positions
+        >>> signal[mask2] = -1.0    # Assign short positions
+    """
+    value: float
+    
+    def accept(self, visitor):
+        return visitor.visit_constant(self)
+```
+
+### 사용 예시: Fama-French 2×3 Factor
+
+```python
+# Step 1: Create size and value classifications
+rc.add_data('size', CsQuantile(Field('market_cap'), bins=2, labels=['small', 'big']))
+rc.add_data('value', CsQuantile(Field('book_to_market'), bins=3, labels=['low', 'medium', 'high']))
+
+# Step 2: Create selector masks
+is_small = rc.data['size'] == 'small'
+is_big = rc.data['size'] == 'big'
+is_low = rc.data['value'] == 'low'
+is_high = rc.data['value'] == 'high'
+
+# Step 3: Construct signal with lazy assignments
+signal = Constant(0.0)                # Implicit blank canvas
+signal[is_small & is_high] = 1.0      # Small/High-Value (long)
+signal[is_big & is_low] = -1.0        # Big/Low-Value (short)
+
+# Step 4: Evaluate (assignments applied here)
+result = rc.evaluate(signal)
+
+# Result: universe-shaped (T, N) array
+#  - 1.0 where size=='small' AND value=='high'
+#  - -1.0 where size=='big' AND value=='low'
+#  - 0.0 elsewhere (neutral)
+#  - NaN outside universe
+```
+
+### Overlapping Masks (Sequential Application)
+
+```python
+signal = Constant(0.0)
+signal[is_small] = 0.5                # All small caps = 0.5
+signal[is_small & is_high] = 1.0      # Small/High overwrites to 1.0
+
+# Result: Later assignment wins for overlapping positions
+#  - Small/High: 1.0 (overwritten)
+#  - Small/Other: 0.5 (from first assignment)
+#  - Others: 0.0 (from Constant)
+```
+
+### Traceability
+
+```python
+# After evaluation, check cached steps
+for step_idx in sorted(rc._evaluator._cache.keys()):
+    name, data = rc._evaluator._cache[step_idx]
+    print(f"Step {step_idx}: {name}")
+
+# Output:
+#   Step 0: Constant_0.0_base             # Base constant array
+#   Step 1: Field_size                     # Size classification
+#   Step 2: Field_value                    # Value classification
+#   Step 3: Equals                         # is_small mask
+#   Step 4: Equals                         # is_high mask
+#   Step 5: And                            # is_small & is_high
+#   Step 6: Constant_0.0_with_assignments  # Final signal with assignments
+```
+
+**핵심 장점**:
+- Base result와 final result가 별도 단계로 캐싱됨
+- PnL tracking에 필수적인 기능
+- 각 할당의 영향을 단계별로 추적 가능
+
+### Implementation Checklist
+
+- ✅ `Expression.__setitem__` with lazy initialization (DRY)
+- ✅ `Visitor.evaluate()` handles assignments
+- ✅ `Visitor._apply_assignments()` sequential application
+- ✅ `Constant` Expression for blank canvas
+- ✅ `visit_constant()` in Visitor
+- ✅ Boolean mask conversion (`.astype(bool)`)
+- ✅ Universe masking integration
+- ✅ Traceability (separate base/final caching)
+- ✅ Tests: storage, evaluation, overlapping masks, caching
+- ✅ Showcase: Fama-French 2×3 factor construction
+
+---
+
+## 3.4.3. Portfolio Weight Scaling 📋 **PLANNED**
+
+### 개요
+
+**Portfolio Weight Scaling**은 임의의 시그널 값을 제약 조건을 만족하는 포트폴리오 가중치로 변환하는 모듈입니다. Strategy Pattern을 사용하여 다양한 스케일링 전략을 플러그인 방식으로 지원합니다.
+
+**핵심 설계 원칙**:
+- **Stateless**: 스케일러는 상태를 저장하지 않음 (항상 명시적 파라미터로 전달)
+- **Strategy Pattern**: 다양한 스케일링 전략을 쉽게 교체 가능
+- **Cross-Sectional**: 각 시점 독립적으로 처리 (`groupby('time').map()` 패턴)
+- **NaN-Aware**: 유니버스 마스킹 자동 보존
+
+### WeightScaler 베이스 클래스
+
+```python
+from abc import ABC, abstractmethod
+import xarray as xr
+
+
+class WeightScaler(ABC):
+    """Abstract base class for weight scaling strategies.
+    
+    Converts arbitrary signal values to portfolio weights by applying
+    constraints cross-sectionally (independently for each time period).
+    
+    Philosophy:
+    - Operates on (T, N) signal DataArray
+    - Returns (T, N) weight DataArray
+    - Each time slice processed independently
+    - NaN-aware (respects universe masking)
+    - Strategy pattern: subclasses define scaling logic
+    """
+    
+    @abstractmethod
+    def scale(self, signal: xr.DataArray) -> xr.DataArray:
+        """Scale signal to weights.
+        
+        Args:
+            signal: (T, N) DataArray with arbitrary signal values
+        
+        Returns:
+            (T, N) DataArray with portfolio weights
+        
+        Note:
+            - Must handle NaN values (preserve them in output)
+            - Must process each time slice independently
+            - Should validate inputs (not all NaN, etc.)
+        """
+        pass
+    
+    def _validate_signal(self, signal: xr.DataArray):
+        """Validate signal before scaling."""
+        if signal.dims != ('time', 'asset'):
+            raise ValueError(
+                f"Signal must have dims ('time', 'asset'), got {signal.dims}"
+            )
+        
+        # Check if any time slice has non-NaN values
+        non_nan_counts = (~signal.isnull()).sum(dim='asset')
+        if (non_nan_counts == 0).all():
+            raise ValueError(
+                "All signal values are NaN across all time periods"
+            )
+```
+
+### GrossNetScaler (통합 프레임워크)
+
+```python
+class GrossNetScaler(WeightScaler):
+    """Unified weight scaler based on gross and net exposure targets.
+    
+    Uses the unified framework:
+        L_target = (G + N) / 2
+        S_target = (G - N) / 2
+    
+    Where:
+        G = target_gross_exposure = sum(abs(weights))
+        N = target_net_exposure = sum(weights)
+        L = sum of positive weights
+        S = sum of negative weights (negative value)
+    
+    Args:
+        target_gross: Target gross exposure (default: 2.0 for 200% gross)
+        target_net: Target net exposure (default: 0.0 for dollar-neutral)
+    
+    Example:
+        >>> # Dollar neutral: L=1.0, S=-1.0
+        >>> scaler = GrossNetScaler(target_gross=2.0, target_net=0.0)
+        >>> 
+        >>> # Net long 10%: L=1.1, S=-0.9
+        >>> scaler = GrossNetScaler(target_gross=2.0, target_net=0.2)
+        >>> 
+        >>> # Crypto futures: L=0.5, S=-0.5
+        >>> scaler = GrossNetScaler(target_gross=1.0, target_net=0.0)
+    """
+    
+    def __init__(self, target_gross: float = 2.0, target_net: float = 0.0):
+        self.target_gross = target_gross
+        self.target_net = target_net
+        
+        # Validate constraints
+        if target_gross < 0:
+            raise ValueError("target_gross must be non-negative")
+        if abs(target_net) > target_gross:
+            raise ValueError(
+                "Absolute net exposure cannot exceed gross exposure"
+            )
+        
+        # Calculate target long and short books
+        self.L_target = (target_gross + target_net) / 2.0
+        self.S_target = (target_net - target_gross) / 2.0  # Negative value
+    
+    def scale(self, signal: xr.DataArray) -> xr.DataArray:
+        """Scale signal using fully vectorized gross/net exposure constraints.
+        
+        Key innovation: NO ITERATION - pure vectorized operations.
+        Always meets gross target, even for one-sided signals.
+        """
+        self._validate_signal(signal)
+        
+        # Step 1: Separate positive/negative (vectorized)
+        s_pos = signal.where(signal > 0, 0.0)
+        s_neg = signal.where(signal < 0, 0.0)
+        
+        # Step 2: Sum along asset dimension (vectorized)
+        sum_pos = s_pos.sum(dim='asset', skipna=True)  # Shape: (time,)
+        sum_neg = s_neg.sum(dim='asset', skipna=True)  # Shape: (time,)
+        
+        # Step 3: Normalize (vectorized, handles 0/0 → nan → 0)
+        norm_pos = (s_pos / sum_pos).fillna(0.0)
+        norm_neg_abs = (np.abs(s_neg) / np.abs(sum_neg)).fillna(0.0)
+        
+        # Step 4: Apply L/S targets (vectorized)
+        weights_long = norm_pos * self.L_target
+        weights_short_mag = norm_neg_abs * np.abs(self.S_target)
+        
+        # Step 5: Combine (subtract to make short side negative)
+        weights = weights_long - weights_short_mag
+        
+        # Step 6: Calculate actual gross per row (vectorized)
+        actual_gross = np.abs(weights).sum(dim='asset', skipna=True)  # Shape: (time,)
+        
+        # Step 7: Scale to meet target gross (vectorized)
+        # Use xr.where to avoid inf from 0/0
+        scale_factor = xr.where(actual_gross > 0, self.target_gross / actual_gross, 1.0)
+        final_weights = weights * scale_factor
+        
+        # Step 8: Convert computational NaN to 0 (BEFORE universe mask)
+        final_weights = final_weights.fillna(0.0)
+        
+        # Step 9: Apply universe mask (preserves NaN where signal was NaN)
+        final_weights = final_weights.where(~signal.isnull())
+        
+        return final_weights
+```
+
+### 편의 Scaler 클래스들
+
+```python
+class DollarNeutralScaler(GrossNetScaler):
+    """Dollar neutral: sum(long) = 1.0, sum(short) = -1.0.
+    
+    Convenience wrapper for GrossNetScaler(2.0, 0.0).
+    
+    This is the most common scaler for market-neutral strategies.
+    """
+    def __init__(self):
+        super().__init__(target_gross=2.0, target_net=0.0)
+
+
+class LongOnlyScaler(WeightScaler):
+    """Long-only portfolio: sum(weights) = target_long.
+    
+    Ignores negative signals, normalizes positive signals to sum to target.
+    Uses vectorized operations for efficiency.
+    
+    Args:
+        target_long: Target sum of weights (default: 1.0)
+    
+    Example:
+        >>> scaler = LongOnlyScaler(target_long=1.0)
+        >>> # All negative signals become 0, positives sum to 1.0
+    """
+    
+    def __init__(self, target_long: float = 1.0):
+        self.target_long = target_long
+    
+    def scale(self, signal: xr.DataArray) -> xr.DataArray:
+        """Scale using vectorized long-only normalization."""
+        self._validate_signal(signal)
+        
+        # Only keep positive values (vectorized)
+        s_pos = signal.where(signal > 0, 0.0)
+        
+        # Sum along asset dimension (vectorized)
+        sum_pos = s_pos.sum(dim='asset', skipna=True)  # Shape: (time,)
+        
+        # Normalize and scale (vectorized, handles 0/0 → nan → 0)
+        weights = (s_pos / sum_pos * self.target_long).fillna(0.0)
+        
+        # Preserve NaN where signal was NaN (universe masking)
+        return weights.where(~signal.isnull())
+```
+
+### Facade 통합
+
+```python
+# In AlphaCanvas class (src/alpha_canvas/core/facade.py)
+
+def scale_weights(
+    self, 
+    signal: Union[Expression, xr.DataArray], 
+    scaler: 'WeightScaler'
+) -> xr.DataArray:
+    """Scale signal to portfolio weights.
+    
+    Args:
+        signal: Expression or DataArray with signal values
+        scaler: WeightScaler strategy instance (REQUIRED)
+    
+    Returns:
+        (T, N) DataArray with portfolio weights
+    
+    Note:
+        Scaler is a required parameter - no default.
+        This is intentional for explicit, research-friendly API.
+    
+    Example:
+        >>> from alpha_canvas.portfolio import DollarNeutralScaler
+        >>> 
+        >>> signal = ts_mean(Field('returns'), 5)
+        >>> scaler = DollarNeutralScaler()
+        >>> weights = rc.scale_weights(signal, scaler)
+        >>> 
+        >>> # Compare multiple scalers
+        >>> w1 = rc.scale_weights(signal, DollarNeutralScaler())
+        >>> w2 = rc.scale_weights(signal, LongOnlyScaler(1.0))
+    """
+    # Evaluate if Expression
+    if hasattr(signal, 'accept'):
+        signal_data = self.evaluate(signal)
+    else:
+        signal_data = signal
+    
+    # Apply scaling strategy
+    weights = scaler.scale(signal_data)
+    
+    return weights
+```
+
+### 사용 패턴 및 예시
+
+**패턴 1: 직접 사용 (가장 명시적)**
+
+```python
+from alpha_canvas.portfolio import DollarNeutralScaler
+
+# 1. Signal 생성
+signal_expr = ts_mean(Field('returns'), 5)
+signal_data = rc.evaluate(signal_expr)
+
+# 2. Scaler 생성 및 적용
+scaler = DollarNeutralScaler()
+weights = scaler.scale(signal_data)
+
+# 검증
+assert abs(weights[weights > 0].sum() - 1.0) < 1e-6  # Long = 1.0
+assert abs(weights[weights < 0].sum() + 1.0) < 1e-6  # Short = -1.0
+```
+
+**패턴 2: Facade 편의 메서드**
+
+```python
+from alpha_canvas.portfolio import GrossNetScaler
+
+signal_expr = ts_mean(Field('returns'), 5)
+scaler = GrossNetScaler(target_gross=2.0, target_net=0.2)
+
+# evaluate + scale 한 번에
+weights = rc.scale_weights(signal_expr, scaler)
+```
+
+**패턴 3: 여러 스케일러 비교 (연구용)**
+
+```python
+from alpha_canvas.portfolio import (
+    DollarNeutralScaler,
+    GrossNetScaler,
+    LongOnlyScaler
+)
+
+# 동일 시그널에 여러 스케일링 전략 적용
+signal = rc.evaluate(my_alpha_expr)
+
+strategies = {
+    'dollar_neutral': DollarNeutralScaler(),
+    'net_long_10pct': GrossNetScaler(2.0, 0.2),
+    'long_only': LongOnlyScaler(1.0),
+    'crypto_futures': GrossNetScaler(1.0, 0.0)
+}
+
+weights_dict = {
+    name: scaler.scale(signal)
+    for name, scaler in strategies.items()
+}
+
+# 각 전략 비교
+for name, weights in weights_dict.items():
+    print(f"{name}:")
+    print(f"  Gross: {abs(weights).sum()}")
+    print(f"  Net: {weights.sum()}")
+```
+
+### Module Structure
+
+```
+src/alpha_canvas/portfolio/
+├── __init__.py              # Export all scalers
+├── base.py                  # WeightScaler abstract base class
+└── strategies.py            # GrossNetScaler, DollarNeutralScaler, LongOnlyScaler
+```
+
+### 테스트 전략
+
+**1. 단위 테스트** (`tests/test_portfolio/test_strategies.py`):
+- `GrossNetScaler` 수학 검증 (L_target, S_target 계산)
+- 각 scaler의 constraint 충족 확인
+- NaN 보존 검증
+- Edge cases: all positive, all negative, zeros
+
+**2. 통합 테스트**:
+- AlphaCanvas.scale_weights() 통합
+- Expression → evaluation → scaling 전체 파이프라인
+- Universe masking 보존 검증
+
+**3. 성능 테스트**:
+- 크로스-섹션 독립성 검증
+- Large dataset (T=1000, N=3000) 벤치마크
+
+### Implementation Checklist
+
+- [ ] `WeightScaler` abstract base class
+- [ ] `GrossNetScaler` with unified framework (fully vectorized)
+- [ ] `DollarNeutralScaler` convenience wrapper
+- [ ] `LongOnlyScaler` implementation (fully vectorized)
+- [ ] `AlphaCanvas.scale_weights()` facade method
+- [ ] Unit tests for each scaler
+- [ ] Integration tests with facade
+- [x] **Experiment: weight scaling validation** (exp_18_weight_scaling.py - ALL PASS ✅)
+- [ ] Showcase: Fama-French signal → weights
+- [x] **Documentation: FINDINGS.md updated** ✅
+- [x] **Documentation: architecture.md updated** ✅
+- [x] **Documentation: implementation.md updated** ✅
+
+**Performance Validated**:
+- Small (10×6): 7ms
+- Medium (100×50): 7ms
+- 1Y Daily (252×100): 8ms
+- Large (1000×500): 34ms
+- **10x-220x speedup** vs iterative approach
+
+---
 
 ## 3.5. 개발 원칙
 
@@ -573,6 +2122,7 @@ class AxisSelector:
 ### 3.8.1. Step 인덱싱 변경사항
 
 **이전 (문자열 기반):**
+
 ```python
 # ❌ 사용하지 마세요
 rc.trace_pnl('alpha1', step='ts_mean')
@@ -580,6 +2130,7 @@ rc.get_intermediate('alpha1', step='ts_mean')
 ```
 
 **현재 (정수 기반):**
+
 ```python
 # ✅ 올바른 사용법
 rc.trace_pnl('alpha1', step=1)  # step 1까지 추적
@@ -593,12 +2144,14 @@ rc.trace_pnl('alpha1')  # step=None (기본값)
 ### 3.8.2. 독립/종속 정렬 패턴
 
 **독립 정렬 (변경 없음):**
+
 ```python
 # ✅ 기존과 동일하게 작동
 rc.add_axis('size', cs_quantile(rc.data.mcap, bins=2, labels=['small','big']))
 ```
 
 **종속 정렬 (신규 기능):**
+
 ```python
 # ✅ 새로운 기능
 rc.add_axis('value', cs_quantile(rc.data.btm, bins=3, labels=['low','mid','high'],
@@ -606,6 +2159,7 @@ rc.add_axis('value', cs_quantile(rc.data.btm, bins=3, labels=['low','mid','high'
 ```
 
 **마스크 기반 필터링 (신규 기능):**
+
 ```python
 # ✅ 새로운 기능
 mask = rc.data.volume > threshold
@@ -618,6 +2172,7 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ### 3.9.1. Step 인덱싱 검증
 
 ✅ **필수 동작:**
+
 - `rc.trace_pnl('alpha', step=2)` → step 2까지의 PnL 반환
 - `rc.get_intermediate('alpha', step=2)` → step 2의 캐시된 DataArray 반환
 - 병렬 Expression (브랜치가 있는 트리)에서 올바른 순서로 인덱싱
@@ -626,6 +2181,7 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ### 3.9.2. 종속 정렬 검증
 
 ✅ **필수 동작:**
+
 - **독립 정렬**: `cs_quantile(...)` → 전체 유니버스 대상 quantile
 - **종속 정렬**: `cs_quantile(..., group_by='axis')` → 각 그룹 내 quantile
 - **마스크 필터링**: `cs_quantile(..., mask=...)` → 필터링된 부분집합 대상 quantile
@@ -634,6 +2190,7 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ### 3.9.3. Fama-French 재현 검증
 
 ✅ **필수 동작:**
+
 - SMB (독립 2×3 정렬) → 예상된 포트폴리오 가중치 생성
 - HML (종속 2×3 정렬) → 예상된 포트폴리오 가중치 생성
 - 독립/종속 방식의 cutoff 차이 검증 (academic paper 기준과 일치)
@@ -641,28 +2198,33 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ## 3.10. 다음 단계
 
 ### Phase 1: 핵심 컴포넌트 구현
+
 - [ ] `Expression` 추상 클래스 및 Leaf/Composite 구현
 - [ ] `EvaluateVisitor` 기본 구조 및 캐싱 메커니즘 (정수 step 카운터 포함)
 - [ ] `ConfigLoader` 및 YAML 파싱
 - [ ] `AlphaCanvas` Facade 기본 구조
 
 ### Phase 2: 연산자 구현
+
 - [ ] Timeseries 연산자 (`ts_mean`, `ts_sum`, etc.)
 - [ ] Cross-sectional 연산자 (`cs_rank`, `cs_quantile` with `group_by` and `mask`)
 - [ ] Transform 연산자 (`group_neutralize`, etc.)
 
 ### Phase 3: 추적성 및 분석
+
 - [ ] `PnLTracer` 구현
 - [ ] 선택적 단계 추적 로직 (정수 인덱스 기반)
 - [ ] 성과 지표 계산
 - [ ] PnL 리포트에 step 메타데이터 표시
 
 ### Phase 4: 인터페이스 완성
+
 - [ ] Property accessor (`rc.data`, `rc.axis`)
 - [ ] NumPy-style 할당 (`rc[mask] = value`)
 - [ ] 헬퍼 메서드 (`rc.ts_mean()` 등)
 
 ### Phase 5: 검증 및 테스트
+
 - [ ] 정수 step 인덱싱 단위 테스트
 - [ ] `_quantile_grouped` 로직 단위 테스트
 - [ ] Fama-French SMB/HML 통합 테스트
@@ -671,4 +2233,3 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 ---
 
 **참고:** 이 문서는 실제 구현 과정에서 발견되는 새로운 패턴과 교훈을 지속적으로 반영해야 합니다 (Living Document).
-

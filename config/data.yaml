@@ -1,0 +1,81 @@
+# Data Field Configuration for alpha-canvas
+# This file defines data field aliases and their database access specifications
+
+# Example: Adjusted close price
+adj_close:
+  db_type: parquet
+  table: PRICEVOLUME
+  index_col: date
+  security_col: security_id
+  value_col: adj_close
+  query: >
+    SELECT 
+      date, 
+      security_id, 
+      close_price * adjustment_factor as adj_close 
+    FROM read_parquet('data/fake/pricevolume.parquet')
+    WHERE date >= :start_date 
+      AND date <= :end_date
+
+# Example: Trading volume
+volume:
+  db_type: parquet
+  table: PRICEVOLUME
+  index_col: date
+  security_col: security_id
+  value_col: volume
+  query: >
+    SELECT 
+      date, 
+      security_id, 
+      volume 
+    FROM read_parquet('data/fake/pricevolume.parquet')
+    WHERE date >= :start_date 
+      AND date <= :end_date
+
+# Example: Market capitalization
+market_cap:
+  table: FUNDAMENTALS
+  index_col: date
+  security_col: securities
+  value_col: market_cap
+  query: >
+    SELECT 
+      DATE as date, 
+      TICKER as securities, 
+      SHARES_OUTSTANDING * CLOSE as market_cap 
+    FROM FUNDAMENTALS
+    WHERE DATE >= :start_date 
+      AND DATE <= :end_date
+
+# Example: GICS Sub-Industry (for grouping/neutralization)
+subindustry:
+  table: SECURITY_MASTER
+  index_col: date
+  security_col: securities
+  value_col: GICS_SUBINDUSTRY
+  query: >
+    SELECT 
+      DATE as date, 
+      TICKER as securities, 
+      GICS_SUBINDUSTRY 
+    FROM SECURITY_MASTER
+    WHERE DATE >= :start_date 
+      AND DATE <= :end_date
+
+# Example: Daily returns
+returns:
+  db_type: parquet
+  table: PRICEVOLUME
+  index_col: date
+  security_col: security_id
+  value_col: return
+  query: >
+    SELECT 
+      date, 
+      security_id, 
+      return 
+    FROM read_parquet('data/fake/pricevolume.parquet')
+    WHERE date >= :start_date 
+      AND date <= :end_date
+
