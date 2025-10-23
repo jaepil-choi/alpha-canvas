@@ -22,6 +22,16 @@
 - ✅ Experiment 20 validated (identical to old DataLoader)
 - ✅ Showcase 18 (integration demonstration)
 
+### ✅ Phase 1.5: Expression Serialization (COMPLETE - 2025-01-23)
+- ✅ SerializationVisitor (Expression → JSON dict)
+- ✅ DeserializationVisitor (dict → Expression)
+- ✅ DependencyExtractor (field lineage)
+- ✅ Convenience wrappers (to_dict, from_dict, get_field_dependencies)
+- ✅ All 14 Expression types supported
+- ✅ 33 comprehensive tests passing
+- ✅ Round-trip validation complete
+- ✅ Showcase 19 (serialization demonstration)
+
 ### 🔄 Phase 2: Data Storage (PLANNED)
 - ⏳ DataWriter (field, alpha, factor)
 - ⏳ MetaTable (catalog)
@@ -1205,18 +1215,20 @@ def test_e2e_alpha_save_and_load():
 - LineageTracker 구현 (의존성 추적)
 
 **Phase 2 전제조건**:
-- ⚠️ **Expression 직렬화** (alpha-canvas에 Visitor Pattern으로 구현 필요):
-  - `SerializationVisitor` (Expression → dict)
-  - `DeserializationVisitor` (dict → Expression)
-  - `DependencyExtractor` (Extract Field dependencies)
-  - 모든 Expression 타입에 visit_* 메서드 구현 (Field, TsMean, Rank, etc.)
-  - Convenience wrappers: `Expression.to_dict()`, `Expression.from_dict()`, `Expression.get_field_dependencies()`
+- ✅ **Expression 직렬화** (COMPLETED - 2025-01-23):
+  - ✅ `SerializationVisitor` (Expression → dict)
+  - ✅ `DeserializationVisitor` (dict → Expression)
+  - ✅ `DependencyExtractor` (Extract Field dependencies)
+  - ✅ 모든 14개 Expression 타입 지원 (Field, Constant, TsMean, TsAny, Rank, CsQuantile, comparison operators, logical operators)
+  - ✅ Convenience wrappers: `Expression.to_dict()`, `Expression.from_dict()`, `Expression.get_field_dependencies()`
+  - ✅ 33 tests passing, round-trip validation complete
+  - ✅ Showcase 19 demonstrating all capabilities
 
 **Phase 2 시작 전 확인사항**:
-- [ ] Phase 1 완전히 검증됨
+- [x] Phase 1 완전히 검증됨
 - [ ] Old DataLoader 제거됨
 - [ ] Documentation 업데이트됨
-- [ ] Expression 직렬화 설계 완료됨
+- [x] Expression 직렬화 구현 완료됨 (2025-01-23)
 
 ### 8.4. 즉시 실행 가능한 작업 (Quick Wins)
 
@@ -1226,14 +1238,14 @@ def test_e2e_alpha_save_and_load():
 3. README 업데이트
 4. Commit: `chore: remove old DataLoader and update showcases`
 
-**Option 2: Expression Serialization** (Phase 2 준비)
-1. `SerializationVisitor` 구현 (Expression → dict)
-2. `DeserializationVisitor` 구현 (dict → Expression)
-3. `DependencyExtractor` 구현 (Field dependencies)
-4. 모든 Expression 타입에 visitor 메서드 추가
-5. Convenience wrappers 구현 (`to_dict()`, `from_dict()`, `get_field_dependencies()`)
-6. Unit tests 작성
-7. Commit: `feat: add visitor-based Expression serialization`
+**Option 2: Expression Serialization** ✅ COMPLETED (2025-01-23)
+1. ✅ `SerializationVisitor` 구현 (Expression → dict)
+2. ✅ `DeserializationVisitor` 구현 (dict → Expression)
+3. ✅ `DependencyExtractor` 구현 (Field dependencies)
+4. ✅ 모든 14개 Expression 타입에 visitor 메서드 추가
+5. ✅ Convenience wrappers 구현 (`to_dict()`, `from_dict()`, `get_field_dependencies()`)
+6. ✅ Unit tests 작성 (33 tests passing)
+7. ✅ Commit: `feat: implement visitor-based Expression serialization`
 
 **Option 3: Phase 2 시작** (바로 진행)
 1. DataWriter 구현 시작
