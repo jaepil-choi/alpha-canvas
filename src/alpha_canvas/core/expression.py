@@ -7,6 +7,7 @@ Expression objects represent "how to compute" without holding actual data.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Dict, Any, List
 
 
 class Expression(ABC):
@@ -166,6 +167,51 @@ class Expression(ABC):
         """
         from alpha_canvas.ops.logical import Not
         return Not(self)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize Expression to dict (convenience wrapper).
+        
+        Returns:
+            JSON-serializable dict representation
+            
+        Example:
+            >>> expr = Rank(TsMean(Field('returns'), window=5))
+            >>> expr_dict = expr.to_dict()
+            >>> # {'type': 'Rank', 'child': {'type': 'TsMean', ...}}
+        """
+        from .serialization import SerializationVisitor
+        return self.accept(SerializationVisitor())
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'Expression':
+        """Deserialize dict to Expression (convenience wrapper).
+        
+        Args:
+            data: Serialized Expression dict
+        
+        Returns:
+            Reconstructed Expression object
+            
+        Example:
+            >>> expr_dict = {...}
+            >>> expr = Expression.from_dict(expr_dict)
+        """
+        from .serialization import DeserializationVisitor
+        return DeserializationVisitor.from_dict(data)
+    
+    def get_field_dependencies(self) -> List[str]:
+        """Extract Field dependencies (convenience wrapper).
+        
+        Returns:
+            List of unique field names this Expression depends on
+            
+        Example:
+            >>> expr = Rank(TsMean(Field('returns'), window=5))
+            >>> deps = expr.get_field_dependencies()
+            >>> # ['returns']
+        """
+        from .serialization import DependencyExtractor
+        return DependencyExtractor.extract(self)
 
 
 @dataclass(eq=False)  # Disable dataclass __eq__ to use Expression operators
