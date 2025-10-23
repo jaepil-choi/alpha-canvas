@@ -2,6 +2,44 @@
 
 이 문서는 alpha-canvas의 구체적인 구현 방법론, 인터페이스 설계, 그리고 개발 표준을 정의합니다.
 
+## 3.0. 구현 현황 요약 (Implementation Status Summary)
+
+**마지막 업데이트**: 2025-01-23
+
+### ✅ **완료된 핵심 기능**
+
+| Feature | Status | Location | Description |
+|---------|--------|----------|-------------|
+| **F1: Data Retrieval** | ✅ DONE | `core/config.py`, `core/data_loader.py` | Config-driven Parquet data loading |
+| **F2: CsQuantile** | ✅ DONE | `ops/classification.py` | Independent/dependent sort bucketing |
+| **F2: Signal Assignment** | ✅ DONE | `core/expression.py` | Lazy evaluation `expr[mask] = value` |
+| **F3: Triple-Cache** | ✅ DONE | `core/visitor.py` | Signal, weight, port_return caching |
+| **F5: Portfolio (Weights)** | ✅ DONE | `portfolio/` | Strategy pattern weight scalers |
+| **F6: Backtesting** | ✅ DONE | `core/visitor.py`, `core/facade.py` | Shift-mask workflow, position returns |
+| **Universe Masking** | ✅ DONE | `core/facade.py`, `core/visitor.py` | Double masking strategy |
+| **Boolean Expressions** | ✅ DONE | `core/expression.py`, `ops/logical.py` | Comparison + logical operators |
+| **DataAccessor** | ✅ DONE | `utils/accessor.py` | `rc.data['field']` interface |
+
+### 📊 **테스트 및 검증 현황**
+
+- ✅ **176개** 단위/통합 테스트 (`tests/`)
+- ✅ **18개** 실험 스크립트 (`experiments/`)
+- ✅ **16개** showcase 예제 (`showcase/`)
+- ✅ Fama-French 2×3 factor 재현 검증
+- ✅ 성능 벤치마크 (vectorized operations)
+
+### 📋 **alpha-lab으로 이관 예정**
+
+alpha-canvas는 **compute engine**에 집중하며, 다음 기능들은 **alpha-lab 패키지**에서 제공됩니다:
+- PnL 분석 및 성과 지표 (Sharpe, drawdown, turnover, etc.)
+- 시각화 (heatmaps, PnL curves, attribution charts)
+- Step 비교 및 진화 분석
+- Factor exposure 및 IC 분석
+
+**설계 근거**: PRD Section 1.9 및 2.1에 명시된 loose coupling 아키텍처 원칙 준수
+
+---
+
 ## 3.1. 프로젝트 구조
 
 ```text
@@ -25,16 +63,18 @@ alpha-canvas/
 │       │   ├── classification.py # cs_quantile, cs_cut (분류기/축 생성)
 │       │   ├── transform.py    # group_neutralize, etc.
 │       │   └── tensor.py       # 미래 확장용 (MVP에서는 비어있음)
-│       ├── portfolio/          # 포트폴리오 구성
+│       ├── portfolio/          # 포트폴리오 구성 (weight scaling)
 │       │   ├── __init__.py
 │       │   ├── base.py         # WeightScaler 추상 베이스 클래스
 │       │   └── strategies.py   # GrossNetScaler, DollarNeutralScaler, LongOnlyScaler
-│       ├── analysis/
-│       │   ├── pnl.py          # PnLTracer
-│       │   └── metrics.py      # 성과 지표 계산
 │       └── utils/
-│           ├── accessor.py     # Property 접근자 (data, axis, rules)
+│           ├── accessor.py     # Property 접근자 (data accessor)
 │           └── mask.py         # 마스크 헬퍼
+├── src/
+│   ├── alpha_lab/              # 분석 패키지 (별도 패키지, 미구현)
+│   │   └── __init__.py
+│   └── alpha_database/         # 영속성 패키지 (별도 패키지, 미구현)
+│       └── __init__.py
 ├── experiments/                # 실험 스크립트
 ├── tests/                      # 테스트
 └── docs/
@@ -1691,11 +1731,15 @@ for step_idx in sorted(rc._evaluator._cache.keys()):
 
 ---
 
-## 3.4.3. Portfolio Weight Scaling 📋 **PLANNED**
+## 3.4.3. Portfolio Weight Scaling ✅ **IMPLEMENTED**
 
 ### 개요
 
 **Portfolio Weight Scaling**은 임의의 시그널 값을 제약 조건을 만족하는 포트폴리오 가중치로 변환하는 모듈입니다. Strategy Pattern을 사용하여 다양한 스케일링 전략을 플러그인 방식으로 지원합니다.
+
+**구현 위치**: `src/alpha_canvas/portfolio/`
+- `base.py`: WeightScaler 추상 베이스 클래스
+- `strategies.py`: GrossNetScaler, DollarNeutralScaler, LongOnlyScaler
 
 **핵심 설계 원칙**:
 - **Stateless**: 스케일러는 상태를 저장하지 않음 (항상 명시적 파라미터로 전달)
@@ -2032,15 +2076,15 @@ src/alpha_canvas/portfolio/
 
 ### Implementation Checklist
 
-- [ ] `WeightScaler` abstract base class
-- [ ] `GrossNetScaler` with unified framework (fully vectorized)
-- [ ] `DollarNeutralScaler` convenience wrapper
-- [ ] `LongOnlyScaler` implementation (fully vectorized)
-- [ ] `AlphaCanvas.scale_weights()` facade method
-- [ ] Unit tests for each scaler
-- [ ] Integration tests with facade
+- [x] `WeightScaler` abstract base class ✅ **DONE** (`portfolio/base.py`)
+- [x] `GrossNetScaler` with unified framework (fully vectorized) ✅ **DONE** (`portfolio/strategies.py`)
+- [x] `DollarNeutralScaler` convenience wrapper ✅ **DONE** (`portfolio/strategies.py`)
+- [x] `LongOnlyScaler` implementation (fully vectorized) ✅ **DONE** (`portfolio/strategies.py`)
+- [x] `AlphaCanvas.scale_weights()` facade method ✅ **DONE** (`core/facade.py`)
+- [x] Unit tests for each scaler ✅ **DONE** (`tests/test_portfolio/`)
+- [x] Integration tests with facade ✅ **DONE** (`tests/test_core/test_facade_weights.py`)
 - [x] **Experiment: weight scaling validation** (exp_18_weight_scaling.py - ALL PASS ✅)
-- [ ] Showcase: Fama-French signal → weights
+- [x] **Showcase: Fama-French signal → weights** ✅ **DONE** (`showcase/14_weight_scaling.py`, `showcase/16_backtest_attribution.py`)
 - [x] **Documentation: FINDINGS.md updated** ✅
 - [x] **Documentation: architecture.md updated** ✅
 - [x] **Documentation: implementation.md updated** ✅
@@ -2195,40 +2239,98 @@ rc.add_axis('filtered', cs_quantile(rc.data.returns, bins=5, labels=[...],
 - HML (종속 2×3 정렬) → 예상된 포트폴리오 가중치 생성
 - 독립/종속 방식의 cutoff 차이 검증 (academic paper 기준과 일치)
 
-## 3.10. 다음 단계
+## 3.10. 구현 현황 및 다음 단계
 
-### Phase 1: 핵심 컴포넌트 구현
+### ✅ Phase 1: 핵심 컴포넌트 구현 **COMPLETE**
 
-- [ ] `Expression` 추상 클래스 및 Leaf/Composite 구현
-- [ ] `EvaluateVisitor` 기본 구조 및 캐싱 메커니즘 (정수 step 카운터 포함)
-- [ ] `ConfigLoader` 및 YAML 파싱
-- [ ] `AlphaCanvas` Facade 기본 구조
+- [x] `Expression` 추상 클래스 및 Leaf/Composite 구현 (`core/expression.py`)
+- [x] `EvaluateVisitor` 기본 구조 및 캐싱 메커니즘 (정수 step 카운터 포함) (`core/visitor.py`)
+- [x] `ConfigLoader` 및 YAML 파싱 (`core/config.py`)
+- [x] `AlphaCanvas` Facade 기본 구조 (`core/facade.py`)
+- [x] `DataPanel` 모델 (`core/data_model.py`)
+- [x] `DataLoader` Parquet 통합 (`core/data_loader.py`)
 
-### Phase 2: 연산자 구현
+### ✅ Phase 2: 연산자 구현 **COMPLETE**
 
-- [ ] Timeseries 연산자 (`ts_mean`, `ts_sum`, etc.)
-- [ ] Cross-sectional 연산자 (`cs_rank`, `cs_quantile` with `group_by` and `mask`)
-- [ ] Transform 연산자 (`group_neutralize`, etc.)
+- [x] Timeseries 연산자 (`ts_mean`, `ts_any` 등) (`ops/timeseries.py`)
+- [x] Cross-sectional 연산자 (`cs_rank`, `cs_quantile` with `group_by` and `mask`) (`ops/crosssection.py`, `ops/classification.py`)
+- [x] Boolean 연산자 (`==`, `!=`, `<`, `>`, `&`, `|`, `~`) (`ops/logical.py`)
+- [x] Constant 연산자 (blank canvas) (`ops/constants.py`)
 
-### Phase 3: 추적성 및 분석
+### ✅ Phase 3: 추적성 구현 **COMPLETE**
 
-- [ ] `PnLTracer` 구현
-- [ ] 선택적 단계 추적 로직 (정수 인덱스 기반)
-- [ ] 성과 지표 계산
-- [ ] PnL 리포트에 step 메타데이터 표시
+- [x] Triple-cache 아키텍처 (signal, weight, port_return) (`core/visitor.py`)
+- [x] 정수 인덱스 기반 step 추적 (`_step_counter`)
+- [x] 공개 API: `get_signal()`, `get_weights()`, `get_port_return()`, `get_daily_pnl()`, `get_cumulative_pnl()` (`core/facade.py`)
+- [x] Backtesting: Shift-mask workflow, position-level returns (`core/visitor.py`)
 
-### Phase 4: 인터페이스 완성
+### ✅ Phase 4: 인터페이스 완성 **COMPLETE**
 
-- [ ] Property accessor (`rc.data`, `rc.axis`)
-- [ ] NumPy-style 할당 (`rc[mask] = value`)
-- [ ] 헬퍼 메서드 (`rc.ts_mean()` 등)
+- [x] Property accessor `rc.data` (Expression 반환) (`utils/accessor.py`)
+- [x] Signal assignment `expr[mask] = value` (lazy evaluation) (`core/expression.py`)
+- [x] Boolean Expression 지원 (comparison + logical operators) (`core/expression.py`, `ops/logical.py`)
+- [x] Universe masking (double masking strategy) (`core/facade.py`, `core/visitor.py`)
 
-### Phase 5: 검증 및 테스트
+### ✅ Phase 5: 포트폴리오 구성 **COMPLETE**
 
-- [ ] 정수 step 인덱싱 단위 테스트
-- [ ] `_quantile_grouped` 로직 단위 테스트
-- [ ] Fama-French SMB/HML 통합 테스트
-- [ ] 종속 정렬 성능 벤치마크
+- [x] `WeightScaler` abstract base class (`portfolio/base.py`)
+- [x] `GrossNetScaler` (unified framework, fully vectorized) (`portfolio/strategies.py`)
+- [x] `DollarNeutralScaler` convenience wrapper (`portfolio/strategies.py`)
+- [x] `LongOnlyScaler` (`portfolio/strategies.py`)
+- [x] Facade 통합: `rc.scale_weights()`, `rc.evaluate(expr, scaler=...)` (`core/facade.py`)
+
+### ✅ Phase 6: 검증 및 테스트 **COMPLETE**
+
+- [x] 176개 단위 및 통합 테스트 (`tests/`)
+- [x] 18개 실험 스크립트 (`experiments/`)
+- [x] 16개 showcase 예제 (`showcase/`)
+- [x] Fama-French 패턴 검증 (`showcase/12_cs_quantile.py`, `showcase/13_signal_assignment.py`)
+- [x] 종속 정렬 성능 벤치마크 (exp_12)
+
+---
+
+### 📋 **미구현 기능** (alpha-lab으로 이관 예정)
+
+- [ ] `PnLTracer` 컴포넌트 → **alpha-lab**으로 이관
+- [ ] 성과 지표 계산 (Sharpe, drawdown, etc.) → **alpha-lab**로 이관
+- [ ] PnL 시각화 (curves, heatmaps) → **alpha-lab**로 이관
+- [ ] Step 비교 및 분석 → **alpha-lab**로 이관
+
+**근거**: alpha-canvas는 **compute engine** (signal 생성, weight 계산, portfolio return 계산)에 집중하며, 분석 및 시각화는 **alpha-lab**에서 제공합니다. 이는 PRD Section 1.9 및 2.1에 명시된 아키텍처 분리 원칙을 따릅니다.
+
+---
+
+### 📦 **다음 주요 작업: Monorepo 리팩토링 및 alpha-database 마이그레이션**
+
+**목표**: 데이터 로딩 책임을 alpha-database 패키지로 분리
+
+#### 마이그레이션 계획:
+
+**Phase 1: alpha-database 패키지 구현**
+1. Config-driven data loader 포팅 (`core/config.py`, `core/data_loader.py` → alpha-database)
+2. Multi-backend 지원 (Parquet, CSV, Excel, DuckDB)
+3. Write capabilities (Dataset/Alpha/Factor catalogs)
+4. Catalog explorer 및 metadata 관리
+
+**Phase 2: alpha-canvas 통합**
+1. Dependency injection: `AlphaCanvas(data_source=alpha_database_instance)`
+2. `Field('adj_close')` → alpha-database 자동 호출
+3. Backward compatibility 유지 (기존 data_loader 유지)
+
+**Phase 3: 검증 및 전환**
+1. 176개 테스트 모두 alpha-database 사용으로 전환
+2. 성능 벤치마크 (기존과 동일 또는 개선)
+3. 기존 data_loader 제거 (alpha-database로 완전 대체)
+
+**Phase 4: 의존성 정리 (`pyproject.toml`)**
+1. alpha-canvas core: `pandas`, `xarray`만 유지
+2. alpha-database extras: `duckdb`, `pyyaml`, `pyarrow`
+3. alpha-lab extras: `scipy`, `matplotlib` (미래)
+
+**참고**: 
+- alpha-canvas의 현재 구현은 **완전히 작동하며 프로덕션 준비 상태**입니다.
+- alpha-database 마이그레이션은 **아키텍처 개선**을 위한 리팩토링이며, 기능 변경이 아닙니다.
+- 마이그레이션 중에도 backward compatibility를 유지하여 리스크를 최소화합니다.
 
 ---
 
