@@ -10,6 +10,7 @@ from alpha_canvas.core.facade import AlphaCanvas
 from alpha_canvas.core.expression import Field
 from alpha_canvas.ops.timeseries import TsMean
 from alpha_canvas.portfolio.strategies import GrossNetScaler, DollarNeutralScaler
+from alpha_database import DataSource
 
 
 class TestAlphaCanvasScaleWeights:
@@ -21,10 +22,12 @@ class TestAlphaCanvasScaleWeights:
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
         assets = ['A', 'B', 'C', 'D']
         
-        time_index = dates
-        asset_index = assets
-        
-        rc = AlphaCanvas(time_index=time_index, asset_index=asset_index)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         # Create signal DataArray
         signal = xr.DataArray(
@@ -46,7 +49,12 @@ class TestAlphaCanvasScaleWeights:
         dates = pd.date_range('2024-01-01', periods=5, freq='D')
         assets = ['A', 'B']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         signal = xr.DataArray(
             np.random.randn(5, 2),
@@ -63,7 +71,12 @@ class TestAlphaCanvasScaleWeights:
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
         assets = ['A', 'B', 'C']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         signal = xr.DataArray(
             np.random.randn(10, 3),
@@ -92,7 +105,12 @@ class TestAlphaCanvasEvaluateWithScaler:
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
         assets = ['A', 'B', 'C']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         # Add returns data
         returns = xr.DataArray(
@@ -126,7 +144,12 @@ class TestAlphaCanvasEvaluateWithScaler:
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
         assets = ['A', 'B', 'C']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         returns = xr.DataArray(
             np.random.randn(10, 3) * 0.02,
@@ -151,7 +174,12 @@ class TestAlphaCanvasEvaluateWithScaler:
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
         assets = ['A', 'B', 'C', 'D']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         returns = xr.DataArray(
             np.random.randn(10, 4) * 0.02,
@@ -181,7 +209,12 @@ class TestAlphaCanvasEvaluateWithScaler:
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
         assets = ['A', 'B', 'C']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         returns = xr.DataArray(
             np.random.randn(10, 3) * 0.02,
@@ -223,7 +256,12 @@ class TestAlphaCanvasEvaluateWithScaler:
         dates = pd.date_range('2024-01-01', periods=5, freq='D')
         assets = ['A', 'B']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         returns = xr.DataArray(
             np.random.randn(5, 2),

@@ -10,6 +10,7 @@ import pandas as pd
 import xarray as xr
 from alpha_canvas.core.facade import AlphaCanvas
 from alpha_canvas.core.expression import Field
+from alpha_database import DataSource
 
 
 class TestAlphaCanvas:
@@ -17,43 +18,37 @@ class TestAlphaCanvas:
     
     def test_alpha_canvas_initialization(self):
         """Test creating AlphaCanvas instance."""
-        rc = AlphaCanvas(config_dir='config')
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         assert rc is not None
         assert rc.db is not None
         assert isinstance(rc.db, xr.Dataset)
     
-    def test_default_time_and_asset_indices(self):
-        """Test AlphaCanvas creates default indices."""
-        rc = AlphaCanvas(config_dir='config')
-        
-        # Should have default time and asset dimensions
-        assert 'time' in rc.db.sizes
-        assert 'asset' in rc.db.sizes
-        assert rc.db.sizes['time'] > 0
-        assert rc.db.sizes['asset'] > 0
+    # REMOVED: test_default_time_and_asset_indices
+    # Reason: time_index/asset_index parameters removed (data_source is mandatory)
     
-    def test_custom_time_and_asset_indices(self):
-        """Test AlphaCanvas with custom indices."""
-        time_idx = pd.date_range('2021-01-01', periods=200)
-        asset_idx = ['AAPL', 'GOOGL', 'MSFT']
-        
-        rc = AlphaCanvas(
-            config_dir='config',
-            time_index=time_idx,
-            asset_index=asset_idx
-        )
-        
-        assert rc.db.sizes['time'] == 200
-        assert rc.db.sizes['asset'] == 3
+    # REMOVED: test_custom_time_and_asset_indices
+    # Reason: time_index/asset_index parameters removed (data_source is mandatory)
     
     def test_add_data_with_dataarray(self):
         """Test adding DataArray directly (inject pattern)."""
-        rc = AlphaCanvas(config_dir='config')
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
-        # Create test data
-        time_idx = list(rc.db.coords['time'].values)
-        asset_idx = list(rc.db.coords['asset'].values)
+        # Create test data matching loaded data dimensions
+        # Load a field first to establish dimensions
+        sample_field = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        time_idx = list(sample_field.coords['time'].values)
+        asset_idx = list(sample_field.coords['asset'].values)
         
         data = xr.DataArray(
             np.random.randn(len(time_idx), len(asset_idx)),
@@ -68,11 +63,17 @@ class TestAlphaCanvas:
     
     def test_add_data_with_expression(self):
         """Test adding data via Expression evaluation."""
-        rc = AlphaCanvas(config_dir='config')
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
-        # First add some data
-        time_idx = list(rc.db.coords['time'].values)
-        asset_idx = list(rc.db.coords['asset'].values)
+        # Get dimensions from a sample field
+        sample_field = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        time_idx = list(sample_field.coords['time'].values)
+        asset_idx = list(sample_field.coords['asset'].values)
         
         returns_data = xr.DataArray(
             np.random.randn(len(time_idx), len(asset_idx)),
@@ -91,11 +92,17 @@ class TestAlphaCanvas:
     
     def test_rules_dict_stores_expressions(self):
         """Test that expressions are stored in rules dict."""
-        rc = AlphaCanvas(config_dir='config')
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
-        # Add data first
-        time_idx = list(rc.db.coords['time'].values)
-        asset_idx = list(rc.db.coords['asset'].values)
+        # Get dimensions
+        sample_field = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        time_idx = list(sample_field.coords['time'].values)
+        asset_idx = list(sample_field.coords['asset'].values)
         
         data = xr.DataArray(
             np.random.randn(len(time_idx), len(asset_idx)),
@@ -113,15 +120,25 @@ class TestAlphaCanvas:
     
     def test_db_property_returns_pure_dataset(self):
         """Test that db property returns pure xarray.Dataset."""
-        rc = AlphaCanvas(config_dir='config')
-        ds = rc.db
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
+        dataset = rc.db
         
-        assert type(ds) == xr.Dataset  # Exact type, not subclass
-        assert not isinstance(ds, AlphaCanvas)
+        assert type(dataset) == xr.Dataset  # Exact type, not subclass
+        assert not isinstance(dataset, AlphaCanvas)
     
     def test_config_loader_accessible(self):
         """Test that ConfigLoader is accessible."""
-        rc = AlphaCanvas(config_dir='config')
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         # Should have config
         assert hasattr(rc, '_config')
@@ -130,11 +147,17 @@ class TestAlphaCanvas:
     
     def test_evaluator_syncs_with_dataset(self):
         """Test that evaluator stays synced with dataset changes."""
-        rc = AlphaCanvas(config_dir='config')
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
-        # Add data
-        time_idx = list(rc.db.coords['time'].values)
-        asset_idx = list(rc.db.coords['asset'].values)
+        # Get dimensions
+        sample_field = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        time_idx = list(sample_field.coords['time'].values)
+        asset_idx = list(sample_field.coords['asset'].values)
         
         data1 = xr.DataArray(
             np.random.randn(len(time_idx), len(asset_idx)),
@@ -152,10 +175,17 @@ class TestAlphaCanvas:
     
     def test_multiple_data_additions(self):
         """Test adding multiple data variables sequentially."""
-        rc = AlphaCanvas(config_dir='config')
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
-        time_idx = list(rc.db.coords['time'].values)
-        asset_idx = list(rc.db.coords['asset'].values)
+        # Get dimensions
+        sample_field = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        time_idx = list(sample_field.coords['time'].values)
+        asset_idx = list(sample_field.coords['asset'].values)
         
         # Add multiple data vars
         for i in range(5):
@@ -166,7 +196,8 @@ class TestAlphaCanvas:
             )
             rc.add_data(f'var_{i}', data)
         
-        assert len(rc.db.data_vars) == 5
+        # Check that all 5 test variables exist (may have additional auto-loaded vars like returns)
+        assert len(rc.db.data_vars) >= 5
         for i in range(5):
             assert f'var_{i}' in rc.db.data_vars
 

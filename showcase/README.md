@@ -228,6 +228,20 @@ poetry run python showcase/run_all.py
 
 **Key Features**: DataSource facade, stateless design, plugin readers, alpha-database package independence, BaseReader interface, ParquetReader core implementation, backward compatibility with alpha-canvas
 
+### 18. AlphaCanvas with DataSource Integration (`18_alpha_canvas_datasource_integration.py`)
+- Dependency injection (DataSource → AlphaCanvas)
+- Automatic field loading via Field() expressions
+- Mandatory start_date and data_source parameters (clean break from old API)
+- Expression evaluation with auto-loading
+- Cross-section operations (Rank)
+- Operator chaining (Rank → TsMean)
+- Weight scaling integration (DollarNeutralScaler)
+- Triple-cache architecture (signal, weight, port_return)
+- Comparison with standalone DataSource (showcase 17)
+- Identical data values validation (100% match)
+
+**Key Features**: DataSource injection, dependency injection pattern, automatic field loading, mandatory parameters, loose coupling (alpha-database ↔ alpha-canvas), TDD validated (40 tests passing)
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:

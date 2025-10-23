@@ -44,23 +44,29 @@ class EvaluateVisitor:
         >>> name, data = visitor.get_cached(0)
     """
     
-    def __init__(self, data_source: xr.Dataset, data_loader=None):
-        """Initialize EvaluateVisitor with data source and optional data loader.
+    def __init__(self, data_source_ds: xr.Dataset, data_source=None):
+        """Initialize EvaluateVisitor with dataset and optional DataSource.
         
         Args:
-            data_source: xarray.Dataset containing all data variables
-            data_loader: Optional DataLoader for loading fields from Parquet
+            data_source_ds: xarray.Dataset containing cached data variables
+            data_source: Optional DataSource from alpha_database for loading fields
         
         Example:
             >>> ds = xr.Dataset(coords={'time': [...], 'asset': [...]})
             >>> visitor = EvaluateVisitor(ds)
             >>> 
-            >>> # With data loader
-            >>> visitor = EvaluateVisitor(ds, data_loader)
+            >>> # With DataSource
+            >>> from alpha_database import DataSource
+            >>> source = DataSource('config')
+            >>> visitor = EvaluateVisitor(ds, data_source=source)
         """
-        self._data = data_source
-        self._data_loader = data_loader
+        self._data = data_source_ds
+        self._data_source = data_source
         self._universe_mask: Optional[xr.DataArray] = None  # Set by AlphaCanvas
+        
+        # Date range (set by AlphaCanvas after construction)
+        self._start_date: Optional[str] = None
+        self._end_date: Optional[str] = None
         
         # Triple-cache architecture for PnL tracing
         self._signal_cache: Dict[int, Tuple[str, xr.DataArray]] = {}  # Persistent
@@ -213,11 +219,11 @@ class EvaluateVisitor:
         return result
     
     def visit_field(self, node) -> xr.DataArray:
-        """Visit Field node: retrieve from dataset or load from DB with INPUT MASKING.
+        """Visit Field node: retrieve from dataset or load via DataSource with INPUT MASKING.
         
         This method first checks if the field exists in the dataset.
-        If not, and a data_loader is available, it loads the field from
-        the database (Parquet file) using the data_loader.
+        If not, and a DataSource is available, it loads the field from
+        the data source (e.g., Parquet files) using the DataSource.
         
         Universe masking is applied at this stage (input masking) to ensure
         all data entering the computation pipeline respects the investable universe.
@@ -226,11 +232,11 @@ class EvaluateVisitor:
             node: Field expression node
         
         Returns:
-            xarray.DataArray from dataset or loaded from DB (with universe applied)
+            xarray.DataArray from dataset or loaded via DataSource (with universe applied)
         
         Raises:
             KeyError: If field name not found in dataset or config
-            RuntimeError: If field not in dataset and no data_loader available
+            RuntimeError: If field not in dataset and no DataSource available
         
         Example:
             >>> field = Field('returns')
@@ -240,13 +246,17 @@ class EvaluateVisitor:
         if node.name in self._data:
             result = self._data[node.name]
         else:
-            # Load from DB using DataLoader
-            if self._data_loader is None:
+            # Load via DataSource
+            if self._data_source is None:
                 raise RuntimeError(
-                    f"Field '{node.name}' not found in dataset and no DataLoader available. "
-                    f"Initialize AlphaCanvas with start_date and end_date to enable data loading."
+                    f"Field '{node.name}' not found in dataset and no DataSource available. "
+                    f"Initialize AlphaCanvas with data_source to enable data loading."
                 )
-            result = self._data_loader.load_field(node.name)
+            result = self._data_source.load_field(
+                node.name,
+                start_date=self._start_date,
+                end_date=self._end_date
+            )
             # Add to dataset for caching
             self._data = self._data.assign({node.name: result})
         

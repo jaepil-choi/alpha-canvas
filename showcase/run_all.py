@@ -56,8 +56,9 @@ def main():
         '14_weight_scaling.py',
         '15_weight_caching_pnl.py',
         '16_backtest_attribution.py',
-        '17_alpha_database_datasource.py'
-    ]
+    '17_alpha_database_datasource.py',
+    '18_alpha_canvas_datasource_integration.py'
+]
     
     results = {}
     
