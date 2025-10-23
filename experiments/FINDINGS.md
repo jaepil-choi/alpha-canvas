@@ -2381,3 +2381,111 @@ self._port_return_cache[step] = (name, port_return) # (T, N) - position-level!
 9. **TODO**: Update documentation (PRD, Architecture, Implementation)
 
 ---
+
+## Phase 9: alpha-database Package
+
+### Experiment 20: DataSource Design Validation
+
+**Date**: 2025-01-23  
+**Status**: ✅ SUCCESS
+
+**Summary**: Validated that the new DataSource design (dates passed per call) produces 100% identical results to the old DataLoader design (dates in constructor). The new stateless design is ready for implementation in the alpha-database package.
+
+#### Key Discoveries
+
+1. **Stateless Design is Correct**
+   - **Old Design**: `DataLoader(config, start_date, end_date)` - dates in constructor
+   - **New Design**: `DataSource(config)` then `load_field(field_name, start_date, end_date)` - dates per call
+   - **Result**: 100% identical outputs (xarray.equals() returns True)
+   - **Max Difference**: 0.00e+00 (perfect match)
+
+2. **Performance Improvement**
+   - **Old Design**: 0.0110s per load
+   - **New Design**: 0.0098s per load
+   - **Improvement**: 10.9% faster (negligible difference)
+   - **Conclusion**: Performance is acceptable for production use
+
+3. **Reusability Validated**
+   - Same DataSource instance can load multiple fields
+   - Tested: `adj_close` → `volume` with same instance
+   - Result: Both fields load correctly without state interference
+   - **Benefit**: Users can create one DataSource and reuse it
+
+4. **Stateless Confirmed**
+   - Same instance can handle different date ranges
+   - Tested: Jan data → Feb data → Jan data again
+   - Result: Jan data identical on both calls (no state leakage)
+   - **Critical**: Proves no hidden state pollution
+
+5. **Design Separation of Concerns**
+   - `ConfigLoader`: Manages YAML config parsing (same as before)
+   - `DataLoader`: Pure transformation (DataFrame → xarray), no config/dates
+   - `DataSource`: Facade that orchestrates config + loader + readers
+   - **Benefit**: Each component has single responsibility
+
+#### Implementation Pattern
+
+**Old Design (alpha-canvas)**:
+```python
+config = ConfigLoader('config')
+loader = DataLoader(config, '2024-01-01', '2024-01-31')
+data = loader.load_field('adj_close')
+```
+
+**New Design (alpha-database)**:
+```python
+ds = DataSource('config/data.yaml')
+data = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+```
+
+**Key Difference**: Date range is now an argument to `load_field()`, not constructor state.
+
+#### Architecture Implications
+
+1. **alpha-database Independence**
+   - Will have its own `ConfigLoader` (copied, not imported from alpha-canvas)
+   - Will have its own `DataLoader` (stateless version)
+   - Will expose `DataSource` as public API
+   - **Benefit**: True separation of concerns, no circular dependencies
+
+2. **Backward Compatibility**
+   - alpha-canvas will keep its old DataLoader until migration complete
+   - No breaking changes to existing code
+   - Gradual migration path for users
+
+3. **Plugin Architecture Ready**
+   - `DataSource` can register custom readers: `ds.register_reader('postgres', PostgresReader())`
+   - Enables specialized readers (FnGuide, Bloomberg) as plugins
+   - MVP will include: ParquetReader, CSVReader (core readers)
+
+#### Lessons Learned
+
+1. **Stateless > Stateful for Data Access**
+   - Dates as parameters (not state) enables reusability
+   - No hidden state = easier to reason about
+   - Same pattern as database connections (pass query, not store it)
+
+2. **Experiment-Driven Development Works**
+   - Validated design before implementing in production
+   - Caught potential issues early (none found, design is sound)
+   - Provides concrete evidence for architecture decisions
+
+3. **Performance is Not a Concern**
+   - 10.9% difference is negligible for I/O-bound operations
+   - Query execution and DataFrame pivoting dominate runtime
+   - Design choice should prioritize clarity over micro-optimization
+
+#### Next Steps
+
+1. ✅ Experiment validated new DataSource design
+2. ✅ Document findings in FINDINGS.md (this entry)
+3. **TODO**: Create alpha_database package structure (core/, readers/)
+4. **TODO**: Port ConfigLoader to alpha_database/core/config.py
+5. **TODO**: Implement stateless DataLoader in alpha_database/core/data_loader.py
+6. **TODO**: Implement BaseReader interface and ParquetReader
+7. **TODO**: Implement DataSource facade
+8. **TODO**: Create integration tests comparing old vs new
+9. **TODO**: Create showcase demonstrating DataSource usage
+10. **TODO**: Eventually integrate DataSource into AlphaCanvas (dependency injection)
+
+---
