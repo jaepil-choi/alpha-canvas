@@ -18,7 +18,11 @@ dependencies = [
 ]
 
 [tool.poetry]
-packages = [{include = "alpha_canvas", from = "src"}]
+packages = [
+    {include = "alpha_canvas", from = "src"},
+    {include = "alpha_database", from = "src"},
+    {include = "alpha_lab", from = "src"},
+]
 
 
 [build-system]
