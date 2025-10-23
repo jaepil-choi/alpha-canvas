@@ -15,6 +15,7 @@ from alpha_canvas.core.expression import Field
 from alpha_canvas.core.visitor import EvaluateVisitor
 from alpha_canvas.ops.timeseries import TsMean
 from alpha_canvas.ops.crosssection import Rank
+from alpha_database import DataSource
 
 
 class TestAlphaCanvasUniverseInit:
@@ -22,13 +23,11 @@ class TestAlphaCanvasUniverseInit:
     
     def test_alphacanvas_init_without_universe(self):
         """Test AlphaCanvas initialization without universe (default behavior)."""
-        dates = pd.date_range('2024-01-01', periods=3, freq='D')
-        assets = ['A', 'B']
-        
+        ds = DataSource('config')
         rc = AlphaCanvas(
-            config_dir='config',
-            time_index=dates,
-            asset_index=assets
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
         )
         
         # Universe should be None
@@ -37,20 +36,24 @@ class TestAlphaCanvasUniverseInit:
     
     def test_alphacanvas_init_with_universe_dataarray(self):
         """Test AlphaCanvas initialization with boolean DataArray universe."""
-        dates = pd.date_range('2024-01-01', periods=3, freq='D')
-        assets = ['A', 'B']
+        ds = DataSource('config')
         
-        # Create universe mask
+        # Load sample data to get actual dimensions
+        sample = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        dates = sample.coords['time'].values
+        assets = sample.coords['asset'].values
+        
+        # Create universe mask matching actual data dimensions
         universe = xr.DataArray(
-            [[True, False], [True, True], [False, True]],
+            np.random.choice([True, False], size=(len(dates), len(assets))),
             dims=['time', 'asset'],
             coords={'time': dates, 'asset': assets}
         )
         
         rc = AlphaCanvas(
-            config_dir='config',
-            time_index=dates,
-            asset_index=assets,
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31',
             universe=universe
         )
         
@@ -61,40 +64,53 @@ class TestAlphaCanvasUniverseInit:
     
     def test_invalid_universe_shape(self):
         """Test error on universe with wrong shape."""
-        dates = pd.date_range('2024-01-01', periods=3, freq='D')
-        assets = ['A', 'B']
+        ds = DataSource('config')
         
-        # Wrong shape universe (2x2 instead of 3x2)
+        # Load sample to get actual dimensions
+        sample = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        dates = sample.coords['time'].values
+        assets = sample.coords['asset'].values
+        
+        # Wrong shape universe (fewer time steps)
         bad_universe = xr.DataArray(
-            [[True, False], [True, True]],  # Only 2 time steps
+            [[True, False], [True, True]],  # Only 2 time steps instead of actual length
             dims=['time', 'asset']
         )
         
+        # Initialize with bad universe
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31',
+            universe=bad_universe
+        )
+        
+        # Shape validation should fail when data is first loaded
         with pytest.raises(ValueError, match="Universe mask shape"):
-            rc = AlphaCanvas(
-                config_dir='config',
-                time_index=dates,
-                asset_index=assets,
-                universe=bad_universe
-            )
+            # Trigger panel initialization by loading data
+            rc.add_data('test', ds.load_field('adj_close', '2024-01-01', '2024-01-31'))
     
     def test_invalid_universe_dtype(self):
         """Test error on universe with non-boolean dtype."""
-        dates = pd.date_range('2024-01-01', periods=3, freq='D')
-        assets = ['A', 'B']
+        ds = DataSource('config')
+        
+        # Load sample to get actual dimensions
+        sample = ds.load_field('adj_close', '2024-01-01', '2024-01-31')
+        dates = sample.coords['time'].values
+        assets = sample.coords['asset'].values
         
         # Float universe instead of boolean
         bad_universe = xr.DataArray(
-            [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            np.ones((len(dates), len(assets)), dtype=float),
             dims=['time', 'asset'],
             coords={'time': dates, 'asset': assets}
         )
         
         with pytest.raises(TypeError, match="Universe must be boolean"):
             rc = AlphaCanvas(
-                config_dir='config',
-                time_index=dates,
-                asset_index=assets,
+                data_source=ds,
+                start_date='2024-01-01',
+                end_date='2024-01-31',
                 universe=bad_universe
             )
 
@@ -376,8 +392,12 @@ class TestUniverseInjectedData:
     
     def test_injected_data_respects_universe(self):
         """Test that add_data with DataArray applies universe mask."""
-        dates = pd.date_range('2024-01-01', periods=3, freq='D')
-        assets = ['A', 'B']
+        ds_source = DataSource('config')
+        
+        # Load sample to get actual dimensions
+        sample = ds_source.load_field('adj_close', '2024-01-01', '2024-01-31')
+        dates = sample.coords['time'].values[:3]  # Use first 3 days
+        assets = sample.coords['asset'].values[:2]  # Use first 2 assets
         
         # External data (calculated in Jupyter)
         external_data = xr.DataArray(
@@ -386,7 +406,7 @@ class TestUniverseInjectedData:
             coords={'time': dates, 'asset': assets}
         )
         
-        # Universe excludes asset B
+        # Universe excludes asset 1 (second asset)
         universe = xr.DataArray(
             [[True, False]] * 3,
             dims=['time', 'asset'],
@@ -394,9 +414,9 @@ class TestUniverseInjectedData:
         )
         
         rc = AlphaCanvas(
-            config_dir='config',
-            time_index=dates,
-            asset_index=assets,
+            data_source=ds_source,
+            start_date='2024-01-01',
+            end_date='2024-01-31',
             universe=universe
         )
         

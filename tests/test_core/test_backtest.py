@@ -14,6 +14,7 @@ from alpha_canvas.core.expression import Field
 from alpha_canvas.core.visitor import EvaluateVisitor
 from alpha_canvas.ops.timeseries import TsMean
 from alpha_canvas.portfolio.strategies import DollarNeutralScaler, GrossNetScaler
+from alpha_database import DataSource
 
 
 class TestPortfolioReturnComputation:
@@ -231,7 +232,12 @@ class TestFacadeConvenienceMethods:
         dates = pd.date_range('2024-01-01', periods=10)
         assets = ['AAPL', 'GOOGL', 'MSFT']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         # Add data
         signal = xr.DataArray(
@@ -265,7 +271,12 @@ class TestFacadeConvenienceMethods:
         dates = pd.date_range('2024-01-01', periods=10)
         assets = ['AAPL', 'GOOGL']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         signal = xr.DataArray(
             np.random.randn(10, 2),
@@ -299,7 +310,12 @@ class TestFacadeConvenienceMethods:
         dates = pd.date_range('2024-01-01', periods=5)
         assets = ['AAPL', 'GOOGL']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         signal = xr.DataArray(
             [[1.0, -1.0]] * 5,
@@ -338,7 +354,12 @@ class TestFacadeConvenienceMethods:
         dates = pd.date_range('2024-01-01', periods=10)
         assets = ['AAPL', 'GOOGL']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         signal = xr.DataArray(
             np.random.randn(10, 2),
@@ -366,7 +387,12 @@ class TestWinnerLoserAttribution:
         dates = pd.date_range('2024-01-01', periods=10)
         assets = ['WINNER', 'LOSER', 'NEUTRAL']
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         # Create signal - WINNER gets positive weight, LOSER gets negative weight
         signal = xr.DataArray(
@@ -415,7 +441,12 @@ class TestWinnerLoserAttribution:
         dates = pd.date_range('2024-01-01', periods=20)
         assets = [f'STOCK_{i}' for i in range(5)]
         
-        rc = AlphaCanvas(time_index=dates, asset_index=assets)
+        ds = DataSource('config')
+        rc = AlphaCanvas(
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
+        )
         
         # Random signal
         np.random.seed(42)

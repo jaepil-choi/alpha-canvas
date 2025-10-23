@@ -1,49 +1,47 @@
 """
-Alpha-Database: Persistence Layer for Alpha Signals and Datasets
+alpha-database: Data persistence and access layer for alpha-canvas ecosystem.
 
-This package provides data persistence capabilities for alpha-canvas,
-including dataset catalogs, alpha signal storage, and factor time series.
+This package provides:
+- Config-driven data loading via DataSource
+- Multi-backend support (Parquet, CSV, PostgreSQL, etc.)
+- Stateless design (date ranges passed per call)
+- Plugin architecture for custom readers
 
-Core Features:
-- Dataset Catalog (D1): Store and manage computed fields with schema evolution
-- Alpha Catalog (D2): Version-controlled alpha signal storage
-- Factor Catalog (D3): Time-series factor returns storage
+Phase 1 (Current): Config-Driven Data Loading
+- DataSource facade for loading fields
+- BaseReader interface for custom readers
+- ParquetReader for file-based data (MVP)
 
-Storage Backends:
-- Parquet (MVP): File-based storage
-- PostgreSQL (Future): Relational database backend
-- ClickHouse (Future): Columnar OLAP backend
+Phase 2 (Future): Data Writing & Catalogs
+- Dataset Catalog: Store computed fields with schema evolution
+- Alpha Catalog: Version-controlled alpha signal storage
+- Factor Catalog: Time-series factor returns storage
 
 Design Principles:
 - Loosely coupled with alpha-canvas via public APIs
 - Pluggable backends for storage flexibility
-- Schema evolution on-the-fly
-- Versioning for reproducibility
+- Stateless and reusable components
+- Config-driven for flexibility
 
 Usage:
-    from alpha_database import DatasetCatalog, AlphaCatalog, FactorCatalog
+    from alpha_database import DataSource, BaseReader
     
-    # Save computed field to dataset
-    catalog = DatasetCatalog(backend='parquet', path='./data')
-    catalog.save_field('fundamental', 'pbr', data)
+    # Load data fields
+    ds = DataSource('config/data.yaml')
+    adj_close = ds.load_field('adj_close', '2024-01-01', '2024-12-31')
     
-    # Save alpha signal
-    alpha_catalog = AlphaCatalog(backend='parquet', path='./alphas')
-    alpha_catalog.save_alpha(
-        alpha_id='momentum_v1',
-        signal=signal_data,
-        weights=weight_data,
-        returns=return_data,
-        metadata={'author': 'researcher', 'date': '2025-01-01'}
-    )
+    # Register custom reader
+    ds.register_reader('custom', CustomReader())
+    custom_data = ds.load_field('custom_field', '2024-01-01', '2024-12-31')
 """
+
+from .core.data_source import DataSource
+from .readers.base import BaseReader
 
 __version__ = "0.1.0"
 
-# Public API placeholder - will be implemented later
 __all__ = [
-    # "DatasetCatalog",  # TODO: Implement in Phase 1
-    # "AlphaCatalog",    # TODO: Implement in Phase 2
-    # "FactorCatalog",   # TODO: Implement in Phase 3
+    'DataSource',
+    'BaseReader',
 ]
 

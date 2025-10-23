@@ -135,16 +135,19 @@ class TestDataAccessorIntegration:
         panel.add_data('momentum', momentum_data)
         panel.add_data('price', price_data)
         
-        # Create AlphaCanvas
+        # Create AlphaCanvas with DataSource (required for new design)
+        from alpha_database import DataSource
+        ds = DataSource('config')
         rc = AlphaCanvas(
-            time_index=time_index,
-            asset_index=asset_index
+            data_source=ds,
+            start_date='2024-01-01',
+            end_date='2024-01-31'
         )
         rc._panel = panel
         
         # Re-initialize evaluator with the populated panel
         from alpha_canvas.core.visitor import EvaluateVisitor
-        rc._evaluator = EvaluateVisitor(rc._panel.db, None)
+        rc._evaluator = EvaluateVisitor(rc._panel.db, ds)
         
         return rc
     
