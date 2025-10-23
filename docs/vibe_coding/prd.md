@@ -2,9 +2,23 @@
 
 ## 1.1. 개요
 
+### 전체 생태계 (Ecosystem)
+
+* **제품군:** alpha-canvas 생태계는 세 개의 독립 패키지로 구성됩니다:
+  * **alpha-canvas**: 시그널 생성 엔진 (Expression 평가, 연산자, 캐싱)
+  * **alpha-lab**: 분석 및 시각화 도구 (성과 지표, PnL 추적, 차트)
+  * **alpha-database**: 영속성 레이어 (데이터셋/알파/팩터 저장)
+
+* **통합 방식:** 세 패키지는 **공개 API를 통해 느슨하게 결합(Loosely Coupled)** 되어 있으며, 사용자는 Jupyter 노트북에서 필요에 따라 조합하여 사용합니다.
+
+### alpha-canvas (본 문서)
+
 * **제품명:** alpha-canvas
-* **목표:** 퀀트 리서처가 Python 네이티브 환경에서 복잡한 알파 아이디어를 빠르고 직관적으로 테스트하고, 그 과정을 투명하게 추적할 수 있는 차세대 리서치 플랫폼을 제공합니다.
-* **비전:** 데이터 검색부터 팩터 생성, PnL 분석까지의 전 과정을 통합된 단일 인터페이스(`rc`)로 제공하여, 팩터 수익률(factor return) 계산을 포함한 아이디어의 프로토타이핑 속도를 획기적으로 단축시킵니다. MVP(Minimum Viable Product)는 `(T, N)` `DataPanel` 모델을 중심으로 팩터(Alpha)를 생성하고 검증하는 경험에 집중합니다. 또한, `alpha-canvas`를 Jupyter 환경과 완벽히 호환되는 **"개방형 툴킷(Open Toolkit)"**으로 제공하여, 기존 리서치 워크플로우에 유연하게 통합될 수 있도록 합니다.
+* **역할:** 시그널 생성 및 백테스트 엔진
+* **목표:** 퀀트 리서처가 Python 네이티브 환경에서 복잡한 알파 아이디어를 빠르고 직관적으로 생성하고, 백테스트할 수 있는 컴퓨팅 엔진을 제공합니다.
+* **비전:** 데이터 검색부터 팩터 생성, 포트폴리오 가중치 계산, 백테스트 실행까지의 과정을 통합된 단일 인터페이스(`rc`)로 제공하여, 시그널 프로토타이핑 속도를 획기적으로 단축시킵니다. MVP는 `(T, N)` `DataPanel` 모델을 중심으로 팩터(Alpha)를 생성하고 백테스트하는 경험에 집중합니다. 또한, `alpha-canvas`를 Jupyter 환경과 완벽히 호환되는 **"개방형 툴킷(Open Toolkit)"**으로 제공하여, 기존 리서치 워크플로우에 유연하게 통합될 수 있도록 합니다.
+
+**중요:** PnL 분석 기능(trace_pnl, 성과 지표 등)은 alpha-canvas 범위를 벗어나며, **alpha-lab 패키지**에서 제공됩니다. 데이터 영속화 기능은 **alpha-database 패키지**에서 제공됩니다.
 
 ## 1.2. 사용자 워크플로우 (User Workflows)
 
@@ -38,9 +52,10 @@ flowchart TD
     Dep --> Canvas
     
     Canvas --> Select["비교로 마스크 생성<br/>rc.data['size'] == 'small'"]
-    Select --> Assign["NumPy-style 할당<br/>rc[mask] = 1.0"]
-    Assign --> PnL["PnL 추적<br/>rc.trace_pnl"]
-    PnL --> Compare{"성과 비교"}
+    Select --> Assign["NumPy-style 할당<br/>signal[mask] = 1.0"]
+    Assign --> Backtest["백테스트 실행<br/>rc.evaluate(signal, scaler)"]
+    Backtest --> Analysis["PnL 분석<br/>alpha-lab 사용"]
+    Analysis --> Compare{"성과 비교"}
     Compare -->|"개선 필요"| DefineAxes
     Compare -->|"만족"| End(["완료"])
 ```
@@ -49,14 +64,14 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start(["복잡한 수식 정의"]) --> Execute["Expression 평가"]
-    Execute --> Results["최종 PnL 확인"]
+    Start(["복잡한 수식 정의"]) --> Execute["Expression 평가 with scaler"]
+    Execute --> Results["alpha-lab로 PnL 분석"]
     Results --> Problem{"문제 발견?"}
     
     Problem -->|"No"| End(["완료"])
-    Problem -->|"Yes"| Trace["단계별 추적<br/>trace_pnl step=N"]
+    Problem -->|"Yes"| Trace["단계별 비교<br/>alpha-lab.compare_steps()"]
     
-    Trace --> Inspect["중간 데이터 확인<br/>get_intermediate"]
+    Trace --> Inspect["중간 시그널 확인<br/>rc.get_signal(step)"]
     Inspect --> Root["근본 원인 파악<br/>어느 단계가 문제?"]
     Root --> Fix["해당 연산자 수정"]
     Fix --> Execute
@@ -67,10 +82,17 @@ flowchart TD
 기존 퀀트 리서치 툴(e.g., WorldQuant BRAIN)은 강력하지만 다음과 같은 명확한 한계를 가집니다.
 
 1. **복잡하고 비직관적인 문법:** `bucket(rank(x), range="0.1, 1, 0.1")`와 같이 문자열 파싱에 의존하는 복잡한 문법은 배우기 어렵고 오류를 유발하기 쉽습니다.
+   * **해결책 (alpha-canvas)**: Python 네이티브 문법 및 연산자 오버로딩 활용
+
 2. **조작 불가능한 "블랙박스" 버킷:**
-      * 기존 인터페이스는 버킷(bucket) 연산의 결과로 `'small'`, `'mid'`와 같은 의미 있는 \*\*레이블(Label)\*\*이 아닌, `0, 1, 2` 같은 \*\*정수 인덱스(Index)\*\*를 반환합니다.
-      * 이로 인해 리서처가 **"Small Size이면서 High Value인 그룹"**을 선택하거나, **"Mid Value 그룹은 제외"**하는 등 Fama-French 스타일의 정교한 포트폴리오 구성 및 데이터 조작이 불가능했습니다. 본 PRD는 이 문제를 "셀렉터 인터페이스"로 해결하는 것을 핵심 목표로 합니다.
+   * 기존 인터페이스는 버킷(bucket) 연산의 결과로 `'small'`, `'mid'`와 같은 의미 있는 **레이블(Label)**이 아닌, `0, 1, 2` 같은 **정수 인덱스(Index)**를 반환합니다.
+   * 이로 인해 리서처가 **"Small Size이면서 High Value인 그룹"**을 선택하거나, **"Mid Value 그룹은 제외"**하는 등 Fama-French 스타일의 정교한 포트폴리오 구성 및 데이터 조작이 불가능했습니다.
+   * **해결책 (alpha-canvas)**: 셀렉터 인터페이스 (레이블 기반 선택, Boolean Expression)
+
 3. **결과 중심의 불투명성 (낮은 추적성):** `group_neutralize(ts_mean('returns', 3), ...)`와 같은 복잡한 수식의 최종 PnL만 알 수 있을 뿐, *중간 단계*(`ts_mean` 적용 직후)에서 `NaN`이 발생했는지, 또는 어느 연산이 PnL을 하락시켰는지 추적하기 매우 어렵습니다.
+   * **해결책 (alpha-canvas + alpha-lab)**: 
+     - alpha-canvas: 중간 결과 캐싱 및 접근 API 제공
+     - alpha-lab: 단계별 PnL 분석 및 비교 도구 제공
 
 ## 1.4. 대상 사용자 (User Persona)
 
@@ -193,32 +215,36 @@ mask_long = (rc.data['size'] == 'small') & (rc.data['surge_event'] == True)
 rc[mask_long] = 1.0  
 ```
 
-### F3: 심층 추적성 (Deep Traceability)
+### F3: 중간 결과 캐싱 (Intermediate Result Caching)
 
-* **요구사항:** (핵심 문제 3 해결) 사용자는 복잡한 수식의 **각 중간 연산 단계별**로 `(T, N)` 데이터 상태와 PnL을 **선택적으로** 추적할 수 있어야 합니다. 단계는 **정수 인덱스(0부터 시작)**로 참조되며, Expression 트리를 **깊이 우선 탐색(depth-first traversal)**으로 순회하면서 부여됩니다.
+* **요구사항:** (핵심 문제 3 해결을 위한 기반) 사용자가 복잡한 수식의 **각 중간 연산 단계별** 데이터 상태를 검사하고, alpha-lab에서 단계별 PnL 분석을 수행할 수 있도록 중간 결과를 캐싱하고 접근 API를 제공해야 합니다. 단계는 **정수 인덱스(0부터 시작)**로 참조되며, Expression 트리를 **깊이 우선 탐색(depth-first traversal)**으로 순회하면서 부여됩니다.
 
 * **단계 인덱싱 예시:**
-  * Expression: `group_neutralize(ts_mean(Field('returns'), 3), 'subindustry')`
+  * Expression: `rank(ts_mean(Field('returns'), 3))`
   * **step 0**: `Field('returns')` → 원본 returns 데이터
   * **step 1**: `ts_mean(Field('returns'), 3)` → 이동평균 적용 후
-  * **step 2**: `group_neutralize(...)` → 그룹 중립화 후 (최종)
+  * **step 2**: `rank(...)` → 순위 변환 후 (최종)
 
-* **시나리오 1: 특정 단계 추적**
-    1. 사용자가 `alpha_expr = group_neutralize(ts_mean(Field('returns'), 3), 'subindustry')` 룰을 정의합니다.
-    2. `rc.add_data_var('alpha1', alpha_expr)`를 실행합니다.
-    3. 이후 `rc.trace_pnl('alpha1', step=1)`를 호출합니다.
-    4. 시스템은 **재계산 없이** step 1 (`ts_mean` 적용 후)의 중간 결과에 대한 PnL만 반환합니다.
+* **트리플 캐시 아키텍처:**
+  * **Signal Cache** (영속적): 모든 중간 시그널 저장 (`_signal_cache`)
+  * **Weight Cache** (갱신 가능): scaler가 제공된 경우 각 step의 포트폴리오 가중치 저장 (`_weight_cache`)
+  * **Portfolio Return Cache** (갱신 가능): scaler가 제공된 경우 각 step의 포지션별 수익 저장 (`_port_return_cache`)
 
-* **시나리오 2: 전체 단계 추적**
-    1. 사용자가 `rc.trace_pnl('alpha1', step=None)`를 호출합니다. (또는 `step` 생략)
-    2. 시스템은 모든 중간 단계의 PnL 리포트를 순서대로 반환합니다:
-          * **step 0**: 원본 `returns`의 PnL
-          * **step 1**: `ts_mean` 적용 후의 PnL
-          * **step 2**: `group_neutralize` 적용 후 최종 PnL
+* **시나리오 1: 시그널 검사**
+    1. 사용자가 `expr = rank(ts_mean(Field('returns'), 3))` Expression을 정의합니다.
+    2. `result = rc.evaluate(expr)`를 실행합니다.
+    3. `rc.get_signal(step=1)`로 `ts_mean` 적용 후 중간 시그널을 조회할 수 있습니다.
+    4. 시스템은 **재계산 없이** 캐시된 `(T, N)` DataArray를 반환합니다.
 
-* **시나리오 3: 중간 데이터 접근**
-    1. 사용자가 `rc.get_intermediate('alpha1', step=1)`를 호출합니다.
-    2. 시스템은 step 1 (`ts_mean` 적용 후)의 `(T, N)` `DataArray`를 반환하여 직접 검사할 수 있게 합니다.
+* **시나리오 2: 가중치 검사 (with scaler)**
+    1. 사용자가 `result = rc.evaluate(expr, scaler=DollarNeutralScaler())`를 실행합니다.
+    2. 시스템은 각 step에서 자동으로 signal, weights, portfolio returns를 계산하고 캐싱합니다.
+    3. `rc.get_weights(step=1)`로 중간 step의 포트폴리오 가중치를 조회할 수 있습니다.
+
+* **시나리오 3: 백테스트 결과 접근**
+    1. 백테스트 실행 후 `rc.get_port_return(step=2)`로 포지션별 수익을 조회합니다 (`(T, N)` shape 보존).
+    2. `rc.get_daily_pnl(step=2)`로 일별 PnL을 조회합니다 (`(T,)` shape로 집계).
+    3. `rc.get_cumulative_pnl(step=2)`로 누적 PnL을 조회합니다.
 
 * **복잡한 Expression 예시:**
   * Expression: `ts_mean(Field('returns'), 3) + rank(Field('market_cap'))`
@@ -227,6 +253,15 @@ rc[mask_long] = 1.0
   * **step 2**: `Field('market_cap')` → 원본 market cap
   * **step 3**: `rank(Field('market_cap'))` → market cap의 순위
   * **step 4**: `add(step1, step3)` → 최종 합계
+
+* **공개 API:**
+  * `rc.get_signal(step)` → 중간 시그널 DataArray 반환
+  * `rc.get_weights(step)` → 포트폴리오 가중치 DataArray 반환 (scaler 사용 시)
+  * `rc.get_port_return(step)` → 포지션별 수익 DataArray 반환 (`(T, N)` shape)
+  * `rc.get_daily_pnl(step)` → 일별 PnL DataArray 반환 (`(T,)` shape)
+  * `rc.get_cumulative_pnl(step)` → 누적 PnL DataArray 반환 (`(T,)` shape)
+
+**중요:** 이러한 캐시된 데이터는 **alpha-lab 패키지**에서 PnL 분석, 성과 지표 계산, 단계별 비교 등에 활용됩니다. alpha-canvas는 데이터 캐싱 및 접근만 담당하며, 분석 로직은 alpha-lab에서 제공합니다.
 
 ### F4: 팩터 수익률 계산 (Core Use Case)
 
@@ -243,13 +278,18 @@ rc[mask_long] = 1.0
 rc.add_data('size', cs_quantile(rc.data['mcap'], bins=2, labels=['small', 'big']))
 rc.add_data('value', cs_quantile(rc.data['btm'], bins=3, labels=['low', 'mid', 'high']))
 
-# 2. Small-Value 포트폴리오 구성
-rc.init_signal_canvas('smb')
-rc[rc.data['size'] == 'small'] = 1.0   # Long small stocks
-rc[rc.data['size'] == 'big'] = -1.0    # Short big stocks
+# 2. SMB 시그널 구성
+smb_signal = Constant(0.0)
+smb_signal[rc.data['size'] == 'small'] = 1.0   # Long small stocks
+smb_signal[rc.data['size'] == 'big'] = -1.0    # Short big stocks
 
-# 3. 팩터 수익률 계산
-smb_returns = rc.trace_pnl('smb')
+# 3. 백테스트 실행
+result = rc.evaluate(smb_signal, scaler=DollarNeutralScaler())
+
+# 4. PnL 분석 (alpha-lab 사용)
+# from alpha_lab import PerformanceAnalyzer
+# analyzer = PerformanceAnalyzer(rc)
+# smb_metrics = analyzer.compute_metrics(step=최종_step)
 ```
 
 * **시나리오 2: 종속 이중 정렬 (Dependent Double Sort)**
@@ -266,13 +306,15 @@ rc.add_data('size', cs_quantile(rc.data['mcap'], bins=2, labels=['small', 'big']
 rc.add_data('value', cs_quantile(rc.data['btm'], bins=3, labels=['low', 'mid', 'high'],
                                    group_by='size'))
 
-# 3. HML 포트폴리오 구성 (각 Size 그룹 내에서 High-Low)
-rc.init_signal_canvas('hml')
-rc[rc.data['value'] == 'high'] = 1.0   # Long high B/M (value stocks)
-rc[rc.data['value'] == 'low'] = -1.0   # Short low B/M (growth stocks)
+# 3. HML 시그널 구성 (각 Size 그룹 내에서 High-Low)
+hml_signal = Constant(0.0)
+hml_signal[rc.data['value'] == 'high'] = 1.0   # Long high B/M (value stocks)
+hml_signal[rc.data['value'] == 'low'] = -1.0   # Short low B/M (growth stocks)
 
-# 4. 팩터 수익률 계산
-hml_returns = rc.trace_pnl('hml')
+# 4. 백테스트 실행 및 PnL 분석 (alpha-lab)
+result = rc.evaluate(hml_signal, scaler=DollarNeutralScaler())
+# analyzer = PerformanceAnalyzer(rc)
+# hml_metrics = analyzer.compute_metrics(step=최종_step)
 ```
 
 * **시나리오 3: 로우레벨 마스크 기반 정렬 (고급)**
@@ -364,7 +406,80 @@ weights = rc.scale_weights(signal_expr, scaler)
 * **최적화 기반**: `OptimizationScaler(constraints)` with cvxpy
 * **포지션 제한**: `max_weight_per_asset`, `turnover_limit` 등
 
-## 1.9. 유니버스 정의 (Universe Definition)
+## 1.9. 백테스팅 (Backtesting - F6) ✅ **IMPLEMENTED**
+
+### 개념
+
+가중치 스케일링 이후, 실제 수익률 데이터를 사용하여 포트폴리오 성과를 시뮬레이션하는 단계입니다. alpha-canvas는 **포지션별 수익** `(T, N)` 을 계산하고 캐싱하여, alpha-lab에서 PnL 분석 및 attribution을 수행할 수 있도록 합니다.
+
+### 요구사항
+
+* **자동 백테스트 실행**: scaler 제공 시 자동으로 백테스트 실행
+* **Forward-bias 방지**: Shift-mask 워크플로우로 미래 정보 사용 방지
+* **포지션별 수익 보존**: `(T, N)` shape 유지하여 winner/loser attribution 가능
+* **온디맨드 집계**: Daily/cumulative PnL은 사용자 요청 시 계산
+* **NaN pollution 방지**: 유니버스 퇴출 시 포지션 자동 청산
+
+### Shift-Mask 워크플로우
+
+```python
+# 내부 로직 (자동 실행):
+# 1. Shift: 어제의 signal로 오늘 거래
+weights_shifted = weights.shift(time=1)
+
+# 2. Re-mask: 현재 유니버스로 재마스킹 (유니버스 퇴출 종목 청산)
+final_weights = weights_shifted.where(universe_mask)
+
+# 3. Element-wise multiply: 포지션별 수익 계산
+port_return = final_weights * returns  # (T, N) shape 보존!
+```
+
+### 사용 시나리오
+
+```python
+# 시나리오 1: 기본 백테스트 (자동 실행)
+result = rc.evaluate(signal_expr, scaler=DollarNeutralScaler())
+# 내부적으로 각 step에서 자동으로:
+#   - Signal 캐싱
+#   - Weights 계산 및 캐싱
+#   - Portfolio returns 계산 및 캐싱
+
+# 시나리오 2: 포지션별 수익 조회 (attribution)
+port_return = rc.get_port_return(step=2)  # (T, N) shape
+total_contrib = port_return.sum(dim='time')  # 종목별 총 기여도
+best_stock = total_contrib.argmax(dim='asset')  # 최고 수익 종목
+
+# 시나리오 3: 일별/누적 PnL 조회
+daily_pnl = rc.get_daily_pnl(step=2)  # (T,) shape
+cumulative_pnl = rc.get_cumulative_pnl(step=2)  # Cumsum (not cumprod)
+final_pnl = cumulative_pnl.isel(time=-1).values
+
+# 시나리오 4: 효율적인 scaler 비교 (signal 재사용)
+result1 = rc.evaluate(expr, scaler=DollarNeutralScaler())
+pnl1 = rc.get_cumulative_pnl(2)
+
+result2 = rc.evaluate(expr, scaler=GrossNetScaler(2.0, 0.3))
+pnl2 = rc.get_cumulative_pnl(2)
+# Signal 캐시 재사용, weights와 port_return만 재계산 (효율적!)
+```
+
+### 설계 근거
+
+* **Forward-bias 방지**: `.shift(time=1)`로 어제의 signal로 오늘 거래
+* **NaN pollution 방지**: Re-masking으로 유니버스 퇴출 시 포지션 청산
+* **Attribution 분석**: `(T, N)` shape 보존으로 winner/loser 식별 가능
+* **공정한 비교**: Cumsum (not cumprod) 사용으로 시간 불변 메트릭 제공
+* **효율성**: Scaler 변경 시 signal 캐시 재사용 (재평가 불필요)
+
+### 공개 API
+
+* `rc.get_port_return(step)` → 포지션별 수익 `(T, N)` DataArray
+* `rc.get_daily_pnl(step)` → 일별 PnL `(T,)` DataArray
+* `rc.get_cumulative_pnl(step)` → 누적 PnL `(T,)` DataArray (cumsum)
+
+**중요:** 백테스트 결과의 **분석 및 시각화**는 **alpha-lab 패키지**에서 제공됩니다. alpha-canvas는 포지션별 수익 계산 및 캐싱만 담당합니다.
+
+## 1.10. 유니버스 정의 (Universe Definition)
 
 ### 개념
 
@@ -408,5 +523,508 @@ rc = AlphaCanvas(
 * **재현성**: 백테스트 재현을 위해 동일한 유니버스 보장
 * **투명성**: 유니버스 변화에 따른 성과 왜곡 방지
 * **편의성**: 수동 마스킹 불필요, 모든 연산에 자동 적용
+
+-----
+
+# 2. Alpha-Lab 요구사항 (Analysis Suite)
+
+## 2.1. 개요
+
+**alpha-lab**은 alpha-canvas가 생성한 시그널 및 백테스트 결과를 분석하고 시각화하는 독립 패키지입니다.
+
+### 핵심 원칙
+
+* **Loosely Coupled**: alpha-canvas의 공개 API만 사용 (`get_signal()`, `get_weights()`, `get_port_return()`)
+* **Jupyter-First**: 노트북 환경에 최적화된 인터랙티브 분석 및 시각화
+* **Pluggable**: 확장 가능한 분석기 및 시각화 컴포넌트
+* **No Internal Access**: Expression 트리나 Visitor 내부 접근 금지 (공개 API만 사용)
+
+### 패키지 구조
+
+```python
+alpha_lab/
+├── core/                    # 기반 클래스
+│   ├── analyzer.py         # BaseAnalyzer (alpha-canvas 공개 API 소비)
+│   └── metrics.py          # Metric 계산 함수들
+├── performance/            # 성과 분석
+│   ├── metrics.py          # PerformanceAnalyzer
+│   ├── risk.py             # RiskAnalyzer
+│   └── attribution.py      # Attribution 분석
+├── visualization/          # 시각화
+│   ├── base.py             # Visualizer 베이스
+│   ├── heatmaps.py         # 2D 히트맵 (signal, weights, returns)
+│   ├── curves.py           # PnL 곡선, underwater charts
+│   └── themes.py           # 색상 스킴 (Korean vs US)
+├── factor/                 # 팩터 분석
+│   ├── exposure.py         # 팩터 노출 회귀
+│   ├── ic.py               # Information Coefficient
+│   └── turnover.py         # Turnover 분석
+├── comparison/             # 비교 도구
+│   ├── strategy.py         # 전략 비교
+│   └── scaler.py           # Scaler 비교
+└── advanced/               # 고급 기능 (미래)
+    ├── sensitivity.py      # 민감도 분석
+    ├── regime.py           # 체제 분석
+    └── monte_carlo.py      # Monte Carlo 시뮬레이션
+```
+
+## 2.2. 핵심 기능 (MVP Scope)
+
+### L1: 성과 지표 계산 (Performance Metrics)
+
+**요구사항**: 백테스트 결과로부터 포괄적인 성과 지표를 계산합니다.
+
+**MVP 지표**:
+- **수익성**: Sharpe ratio, Sortino ratio, Calmar ratio, Total return
+- **리스크**: Volatility (annualized), Max drawdown, Drawdown duration
+- **거래**: Turnover (daily, annualized), Margin (PnL per dollar traded)
+- **포지션**: Long/short stock counts (average), Position concentration
+- **정확도**: Hit ratio (direction correctness: sign(weight) == sign(return))
+
+**시간 집계**: Daily → Monthly → Yearly 변환 기능
+
+**사용 예시**:
+
+```python
+from alpha_lab import PerformanceAnalyzer
+
+# 분석기 초기화 (alpha-canvas 인스턴스 소비)
+analyzer = PerformanceAnalyzer(rc)
+
+# 단일 step 지표 계산
+metrics = analyzer.compute_metrics(step=2)
+print(f"Sharpe: {metrics['sharpe']:.2f}")
+print(f"Max Drawdown: {metrics['max_drawdown']:.2%}")
+print(f"Turnover: {metrics['turnover_annual']:.2%}")
+
+# Step 비교 (N vs N-1)
+diff = analyzer.compare_steps(step_from=1, step_to=2)
+print(f"Sharpe improvement: {diff['sharpe_delta']:+.2f}")
+
+# Multi-step 진화
+evolution = analyzer.step_evolution(steps=[0, 1, 2])
+# Returns DataFrame: rows=steps, cols=metrics
+```
+
+### L2: PnL 추적 및 비교 (PnL Tracing)
+
+**요구사항**: 단계별 PnL 변화를 추적하고 비교합니다.
+
+**핵심 질문에 답변**:
+- "이 연산자를 추가하니 성과가 개선되었나?"
+- "어느 단계에서 PnL이 하락했나?"
+- "최종 시그널과 원본 시그널의 차이는?"
+
+**사용 예시**:
+
+```python
+# Step N vs Step N-1 비교
+comparison = analyzer.compare_steps(1, 2)
+print(f"Sharpe: {comparison['sharpe_before']:.2f} → {comparison['sharpe_after']:.2f}")
+print(f"Change: {comparison['sharpe_delta']:+.2f}")
+
+# 전체 step 진화 보기
+df_evolution = analyzer.step_evolution(steps=[0, 1, 2])
+#       Sharpe  MaxDD  Turnover
+# Step0   0.5   -0.15    0.30
+# Step1   0.7   -0.12    0.35
+# Step2   0.6   -0.10    0.40
+```
+
+## 2.3. 시각화 기능 (Future Expansion)
+
+### V1: 2D 히트맵 (Heatmaps)
+
+**요구사항**: Signal, weights, returns를 2D (T × N) 히트맵으로 시각화합니다.
+
+**특징**:
+- **색상 스킴 선택 가능**:
+  - Korean: 파란색(음수), 흰색(0), 빨간색(양수)
+  - US: 빨간색(음수), 흰색(0), 초록색(양수)
+- **인터랙티브**: Plotly 기반, zoom/pan/hover
+
+```python
+from alpha_lab import Visualizer
+
+viz = Visualizer(rc, color_scheme='korean')
+
+# Signal 히트맵
+fig = viz.heatmap_signal(step=2)
+fig.show()  # Jupyter 출력
+
+# Weights 히트맵
+fig = viz.heatmap_weights(step=2)
+
+# Portfolio returns 히트맵
+fig = viz.heatmap_returns(step=2)
+```
+
+### V2: PnL Evolution Curves
+
+**요구사항**: 시간에 따른 PnL 변화를 라인 플롯으로 시각화합니다.
+
+**Option B (Multi-step comparison)**: 여러 step의 누적 PnL을 겹쳐서 표시하여 연산자 추가 효과를 시각적으로 확인합니다.
+
+```python
+# 단일 step PnL 곡선
+fig = viz.pnl_curve(step=2, cumulative=True)
+
+# Multi-step 비교 (핵심!)
+fig = viz.compare_pnl_curves(
+    steps=[0, 1, 2],
+    labels=['Raw Signal', 'After TsMean', 'After Rank']
+)
+# 3개 라인이 겹쳐져서 표시됨
+# → 어느 연산자가 PnL을 개선/악화시켰는지 즉시 확인
+
+# Underwater chart (drawdown 시각화)
+fig = viz.underwater_chart(step=2)
+```
+
+### V3: Attribution Waterfall
+
+**요구사항**: Winner/loser 기여도를 바 차트로 시각화합니다.
+
+```python
+# Top 10 winners, bottom 10 losers
+fig = viz.attribution_waterfall(step=2, top_n=10)
+# Green bars: winners, Red bars: losers
+```
+
+## 2.4. 고급 분석 기능 (Future Expansion)
+
+### A1: Factor Exposure Analysis
+
+**요구사항**: 시그널의 암묵적 팩터 노출을 분석합니다.
+
+```python
+from alpha_lab import FactorAnalyzer
+
+factor_analyzer = FactorAnalyzer(rc)
+
+# 팩터 회귀
+exposures = factor_analyzer.regress_on_factors(
+    step=2,
+    factors=['market', 'size', 'value', 'momentum']
+)
+# Returns: betas, R², alpha
+
+# Rolling factor betas
+rolling_betas = factor_analyzer.rolling_betas(step=2, window='1Y')
+```
+
+### A2: IC (Information Coefficient) Analysis
+
+**요구사항**: 시그널의 예측력을 분석합니다.
+
+```python
+from alpha_lab import ICAnalyzer
+
+ic_analyzer = ICAnalyzer(rc)
+
+# Signal predictiveness
+ic = ic_analyzer.compute_ic(step=2, forward_returns=1)
+# Returns: Pearson IC, Spearman Rank IC
+
+# IC decay (signal persistence)
+ic_decay = ic_analyzer.ic_decay(step=2, horizons=[1, 5, 10, 20])
+
+# Rolling IC (stability)
+rolling_ic = ic_analyzer.rolling_ic(step=2, window='3M')
+```
+
+### A3: Sensitivity Analysis (민감도 분석)
+
+**요구사항**: 입력 데이터 변화에 대한 PnL 민감도를 분석합니다 ("diff" feature).
+
+```python
+from alpha_lab import SensitivityAnalyzer
+
+sensitivity = SensitivityAnalyzer(rc)
+
+# Field 데이터 perturbation
+field_sensitivity = sensitivity.perturb_field(
+    field_name='market_cap',
+    perturbation=0.01,  # +1%
+    step=2
+)
+# Returns: {'original_pnl': X, 'perturbed_pnl': Y, 'delta': Y-X}
+
+# Intermediate signal perturbation
+signal_sensitivity = sensitivity.perturb_signal(
+    step=1,  # TsMean 결과 perturb
+    perturbation=0.05,
+    final_step=2
+)
+
+# Tornado chart (어느 입력이 가장 중요한가?)
+fig = sensitivity.tornado_chart(
+    fields=['market_cap', 'returns', 'volume'],
+    perturbation_range=[-0.1, 0.1]
+)
+```
+
+## 2.5. MVP 구현 우선순위
+
+**Phase 1 (Immediate)**:
+- ✅ PerformanceAnalyzer (metrics computation)
+- ✅ Step comparison (step N vs N-1)
+- ✅ 기본 통계 (Sharpe, volatility, drawdown, turnover)
+
+**Phase 2 (Near-term)**:
+- [ ] Visualizer (heatmaps, PnL curves)
+- [ ] Color scheme support (Korean/US)
+- [ ] Attribution waterfall charts
+
+**Phase 3 (Future)**:
+- [ ] Factor analysis (exposure, IC)
+- [ ] Sensitivity analysis (diff feature)
+- [ ] Regime analysis
+- [ ] Monte Carlo simulation
+
+-----
+
+# 3. Alpha-Database 요구사항 (Persistence Layer)
+
+## 3.1. 개요
+
+**alpha-database**는 alpha-canvas에서 생성된 데이터를 영구 저장하고 관리하는 독립 패키지입니다.
+
+### 핵심 원칙
+
+* **Loosely Coupled**: alpha-canvas 공개 API를 통해 데이터 추출
+* **Pluggable Backends**: Parquet, PostgreSQL, ClickHouse 등 선택 가능
+* **Schema Evolution**: 동적 스키마 변경 지원 (컬럼 추가)
+* **Versioning**: Alpha 및 팩터 버전 관리
+
+### 패키지 구조
+
+```python
+alpha_database/
+├── backends/               # 스토리지 백엔드
+│   ├── base.py            # StorageBackend ABC
+│   ├── parquet.py         # ParquetStore (MVP)
+│   ├── postgres.py        # PostgresStore (Future)
+│   └── clickhouse.py      # ClickHouseStore (Future)
+├── catalog/               # 카탈로그 관리
+│   ├── dataset.py         # DatasetCatalog (computed fields)
+│   ├── alpha.py           # AlphaCatalog (versioned alphas)
+│   └── factor.py          # FactorCatalog (factor returns)
+├── schema/                # 스키마 관리
+│   ├── manager.py         # 스키마 진화 on-the-fly
+│   └── migrations.py      # 버전 추적
+└── integration/           # alpha-canvas 통합
+    └── canvas.py          # Helper functions
+```
+
+## 3.2. 핵심 기능
+
+### D1: Dataset Catalog (Computed Field Storage)
+
+**요구사항**: 계산된 필드를 저장하고 스키마를 동적으로 진화시킵니다.
+
+**Use Case**: 파생 지표 (PBR, EV/EBITDA 등)를 계산하여 재사용합니다.
+
+**시나리오**:
+
+```python
+from alpha_database import ParquetStore
+
+store = ParquetStore(base_path='./data')
+
+# 시나리오 1: PBR 계산 및 저장
+pbr = rc.data['price'] / rc.data['book_value']
+result = rc.evaluate(pbr)
+
+store.save_to_dataset(
+    data=result,
+    dataset_name='fundamental',
+    field_name='pbr',
+    metadata={'description': 'Price to Book Ratio', 'created': '2025-01-23'}
+)
+# Result: fundamental.parquet with [date, asset, pbr]
+
+# 시나리오 2: 동일 dataset에 EV/EBITDA 추가 (schema evolution)
+ev_ebitda = rc.data['ev'] / rc.data['ebitda']
+result2 = rc.evaluate(ev_ebitda)
+
+store.save_to_dataset(
+    data=result2,
+    dataset_name='fundamental',  # SAME dataset
+    field_name='ev_ebitda'       # NEW column
+)
+# Result: fundamental.parquet now has [date, asset, pbr, ev_ebitda]
+
+# 시나리오 3: 나중에 로드
+fundamental_data = store.load_dataset('fundamental', fields=['pbr', 'ev_ebitda'])
+```
+
+**핵심 특징**:
+- **Schema-on-write**: 컬럼 동적 추가
+- **Additive**: 기존 컬럼 유지
+- **Reusable**: config/data.yaml에서 참조 가능
+
+### D2: Alpha Catalog (Versioned Alpha Storage)
+
+**요구사항**: 완전한 알파 (signal + weights + returns)를 메타데이터와 함께 저장합니다.
+
+**Use Case**: 알파 버전 관리, 재현성 보장, 성과 비교.
+
+**시나리오**:
+
+```python
+from alpha_database import AlphaCatalog
+
+catalog = AlphaCatalog(store)
+
+# 알파 평가
+expr = Rank(TsMean(Field('returns'), 5))
+result = rc.evaluate(expr, scaler=DollarNeutralScaler())
+
+# 완전한 알파 저장
+catalog.save_alpha(
+    alpha_id='momentum_ma5_rank_v1',
+    canvas=rc,  # 공개 API로 데이터 추출
+    step=2,
+    metadata={
+        'description': 'Momentum MA5 with Rank',
+        'expression': str(expr),
+        'sharpe': 0.73,
+        'created': '2025-01-23',
+        'author': 'researcher_name'
+    },
+    include=['signal', 'weights', 'returns']
+)
+
+# Result: alphas/momentum_ma5_rank_v1/ directory:
+#   - signal.parquet (T, N)
+#   - weights.parquet (T, N)
+#   - returns.parquet (T, N)
+#   - metadata.json
+
+# 나중에 로드
+alpha_data = catalog.load_alpha('momentum_ma5_rank_v1')
+# Returns: {'signal': DataArray, 'weights': DataArray, 'returns': DataArray, 'metadata': dict}
+```
+
+**핵심 특징**:
+- **Versioned**: 각 알파는 고유 ID
+- **Complete**: Signal, weights, returns 모두 저장
+- **Reproducible**: 재로드하여 분석 재현
+
+### D3: Factor Catalog (Factor Return Time Series)
+
+**요구사항**: 팩터 수익률 time series를 저장합니다.
+
+**Use Case**: Fama-French 팩터, 커스텀 팩터 라이브러리 구축.
+
+**시나리오**:
+
+```python
+from alpha_database import FactorCatalog
+
+factor_catalog = FactorCatalog(store)
+
+# Factor returns 획득
+smb_returns = rc.get_daily_pnl(step=2)  # (T,) time series
+
+# Factor 저장
+factor_catalog.save_factor(
+    factor_id='fama_french_smb',
+    returns=smb_returns,
+    metadata={
+        'description': 'Fama-French Size Factor',
+        'construction': 'Independent 2x3 sort on size/value',
+        'rebalance': 'monthly',
+        'universe': 'KOSPI200'
+    }
+)
+
+# Result: factors.parquet with [factor_id, date, factor_return]
+
+# 나중에 로드
+smb_returns = factor_catalog.load_factor('fama_french_smb')
+```
+
+**핵심 특징**:
+- **Time series only**: `(T,)` shape (not `(T, N)`)
+- **Factor library**: 여러 팩터 누적
+- **Regression-ready**: 회귀 분석에 사용 가능
+
+## 3.3. Storage Backends
+
+### MVP: Parquet Backend
+
+**특징**:
+- 파일 기반 (서버 불필요)
+- 이식 가능 (파일 복사로 공유)
+- 압축 효율적
+- Pandas/xarray 네이티브 지원
+
+```python
+store = ParquetStore(base_path='./data')
+```
+
+### Future: PostgreSQL Backend
+
+**특징**:
+- ACID 트랜잭션
+- Multi-user 접근
+- SQL 쿼리 지원
+- 서버 관리 필요
+
+```python
+store = PostgresStore(connection_string='postgresql://...')
+```
+
+### Future: ClickHouse Backend
+
+**특징**:
+- 대용량 데이터 최적화
+- 고속 집계 쿼리
+- Time-series 특화
+- 분산 시스템
+
+```python
+store = ClickHouseStore(connection_string='clickhouse://...')
+```
+
+## 3.4. Integration with alpha-canvas
+
+**핵심**: alpha-database는 alpha-canvas의 **공개 API만** 사용합니다.
+
+```python
+# In alpha_database/integration/canvas.py
+
+class CanvasReader:
+    """Helper to extract data from AlphaCanvas for saving."""
+    
+    @staticmethod
+    def extract_step_data(canvas, step: int):
+        """Extract all data for a specific step via public API."""
+        signal = canvas.get_signal(step)      # Public API
+        weights = canvas.get_weights(step)    # Public API
+        port_return = canvas.get_port_return(step)  # Public API
+        
+        return {
+            'signal': signal,
+            'weights': weights,
+            'port_return': port_return
+        }
+```
+
+## 3.5. MVP 구현 우선순위
+
+**Phase 1 (Immediate)**:
+- ✅ Parquet backend
+- ✅ DatasetCatalog (schema evolution)
+- ✅ AlphaCatalog (versioned storage)
+- ✅ FactorCatalog (time series)
+
+**Phase 2 (Future)**:
+- [ ] PostgreSQL backend
+- [ ] ClickHouse backend
+- [ ] Migration tools
+- [ ] Backup/restore utilities
 
 -----
