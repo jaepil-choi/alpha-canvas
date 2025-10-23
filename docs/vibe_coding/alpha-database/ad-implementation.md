@@ -6,7 +6,35 @@
 
 **핵심 원칙**: alpha-database는 **데이터 CRUD와 쿼리**에만 집중합니다. 데이터 수집, 계산, Expression 직렬화는 다른 컴포넌트의 책임입니다.
 
-## 2. P0: Config-Driven Data Loading 구현
+---
+
+## 구현 현황 (Implementation Status)
+
+### ✅ Phase 1: Config-Driven Data Loading (COMPLETE)
+- ✅ ConfigLoader (독립적)
+- ✅ DataLoader (pivoting)
+- ✅ DataSource facade
+- ✅ BaseReader interface
+- ✅ ParquetReader (DuckDB backend)
+- ✅ Plugin architecture (register_reader)
+- ✅ Alpha-Canvas integration (dependency injection)
+- ✅ 100% test coverage (40 tests passing)
+- ✅ Experiment 20 validated (identical to old DataLoader)
+- ✅ Showcase 18 (integration demonstration)
+
+### 🔄 Phase 2: Data Storage (PLANNED)
+- ⏳ DataWriter (field, alpha, factor)
+- ⏳ MetaTable (catalog)
+- ⏳ LineageTracker (explicit dependencies)
+
+### 📝 Phase 3: Documentation & Migration (PLANNED)
+- ⏳ End-to-end examples
+- ⏳ Migration guide for users
+- ⏳ Performance benchmarks
+
+---
+
+## 2. P0: Config-Driven Data Loading 구현 (✅ COMPLETE)
 
 ### 2.1. ConfigLoader 구현 (독립적)
 
@@ -266,71 +294,119 @@ class MyCustomReader(BaseReader):
 ds.register_reader('my_custom', MyCustomReader())
 ```
 
-### 2.8. Alpha-Canvas 통합
+### 2.8. Alpha-Canvas 통합 (✅ IMPLEMENTED)
+
+**Status**: ✅ Complete (Breaking Change - No Backward Compatibility)
+
+**Implementation Date**: 2025-01-23
+
+**Changes Made**:
 
 ```python
-# In alpha_canvas/core/facade.py (수정)
+# In alpha_canvas/core/facade.py (IMPLEMENTED)
 
 class AlphaCanvas:
     def __init__(
         self,
-        start_date: str,
-        end_date: str,
-        universe: Optional[xr.DataArray] = None,
-        data_source: Optional['DataSource'] = None  # NEW!
+        data_source: 'DataSource',        # MANDATORY
+        start_date: str,                  # MANDATORY
+        end_date: Optional[str] = None,   # OPTIONAL
+        config_dir: str = 'config',
+        universe: Optional[Union[Expression, xr.DataArray]] = None
     ):
+        """Initialize AlphaCanvas with DataSource injection.
+        
+        BREAKING CHANGE:
+        - data_source: MANDATORY (no default)
+        - start_date: MANDATORY (no default)
+        - time_index, asset_index: REMOVED
+        """
+        self._data_source = data_source
         self.start_date = start_date
         self.end_date = end_date
-        self._universe = universe
         
-        # Dependency Injection
-        if data_source is not None:
-            self._data_source = data_source
-        else:
-            # Backward compatibility: use internal loader
-            from .config import ConfigLoader
-            from .data_loader import DataLoader
-            self._config = ConfigLoader()
-            self._data_loader = DataLoader()
-            self._data_source = None
+        # Lazy panel initialization
+        self._panel = None
+        
+        # Initialize evaluator with DataSource
+        empty_ds = xr.Dataset()
+        self._evaluator = EvaluateVisitor(empty_ds, data_source=data_source)
+        self._evaluator._start_date = start_date
+        self._evaluator._end_date = end_date
         
         # ... rest of initialization
 ```
 
 ```python
-# In alpha_canvas/core/visitor.py (수정)
+# In alpha_canvas/core/visitor.py (IMPLEMENTED)
 
 class EvaluateVisitor:
+    def __init__(self, data_source_ds: xr.Dataset, data_source=None):
+        """Initialize with DataSource.
+        
+        Args:
+            data_source_ds: xarray.Dataset for cached data
+            data_source: Optional DataSource from alpha_database
+        """
+        self._data = data_source_ds
+        self._data_source = data_source  # Changed from _data_loader
+        self._start_date = None  # Set by AlphaCanvas
+        self._end_date = None
+    
     def visit_field(self, node: Field) -> xr.DataArray:
         """Field 노드 방문 (데이터 로딩)."""
         # Check cache
-        if node.name in self._canvas.db:
-            result = self._canvas.db[node.name]
+        if node.name in self._data:
+            result = self._data[node.name]
         else:
-            # Use DataSource if available
-            if self._canvas._data_source is not None:
-                result = self._canvas._data_source.load_field(
-                    node.name,
-                    start_date=self._canvas.start_date,
-                    end_date=self._canvas.end_date
-                )
-            else:
-                # Backward compatibility: use internal loader
-                result = self._canvas._data_loader.load_field(
-                    node.name,
-                    self._canvas.start_date,
-                    self._canvas.end_date
+            # Load via DataSource (MANDATORY)
+            if self._data_source is None:
+                raise RuntimeError(
+                    f"Field '{node.name}' not found and no DataSource available"
                 )
             
+            result = self._data_source.load_field(
+                node.name,
+                start_date=self._start_date,
+                end_date=self._end_date
+            )
+            
             # Cache
-            self._canvas.db = self._canvas.db.assign({node.name: result})
+            self._data = self._data.assign({node.name: result})
         
         # Apply INPUT MASKING
         if self._universe_mask is not None:
             result = result.where(self._universe_mask, np.nan)
         
+        self._cache_signal_weights_and_returns(f"Field_{node.name}", result)
         return result
 ```
+
+**Migration Example**:
+
+```python
+# OLD (REMOVED):
+rc = AlphaCanvas(
+    time_index=pd.date_range('2024-01-01', periods=252),
+    asset_index=['AAPL', 'GOOGL', 'MSFT']
+)
+
+# NEW (REQUIRED):
+from alpha_database import DataSource
+
+ds = DataSource('config')
+rc = AlphaCanvas(
+    data_source=ds,
+    start_date='2024-01-01',
+    end_date='2024-12-31'
+)
+```
+
+**Validation Results**:
+- ✅ 40/40 tests passing (100% success rate)
+- ✅ Experiment 20: 100% identical results to old DataLoader
+- ✅ Showcase 18: Full integration demonstrated
+- ✅ TDD Red-Green cycle complete
 
 ---
 
@@ -536,27 +612,181 @@ class DataWriter:
         return df
 ```
 
-### 3.2. Alpha-Canvas Expression 직렬화 (alpha-canvas 책임)
+### 3.2. Alpha-Canvas Expression 직렬화 (Visitor Pattern)
 
 **중요**: 이 코드는 **alpha-canvas**에 구현되어야 합니다. alpha-database는 직렬화된 결과(dict)만 저장합니다.
 
+**설계 원칙**: **Visitor Pattern**을 사용하여 Expression 직렬화를 수행합니다. 이는 Expression 클래스를 직렬화 로직으로부터 분리합니다.
+
 ```python
-# In alpha_canvas/core/expression.py (추가)
+# In alpha_canvas/core/serialization.py (NEW FILE)
+
+from typing import Dict, Any, List
+from .expression import Expression, Field, Constant
+from ..ops.timeseries import TsMean, TsAny
+from ..ops.crosssection import Rank, CsQuantile
+from ..ops.logical import And, Or
+
+class SerializationVisitor:
+    """Expression tree를 dict로 직렬화하는 visitor.
+    
+    이 visitor는 Expression tree를 순회하며 각 노드를
+    JSON-serializable dict로 변환합니다.
+    """
+    
+    def visit_field(self, node: Field) -> Dict[str, Any]:
+        """Field 노드 직렬화."""
+        return {
+            'type': 'Field',
+            'name': node.name
+        }
+    
+    def visit_constant(self, node: Constant) -> Dict[str, Any]:
+        """Constant 노드 직렬화."""
+        return {
+            'type': 'Constant',
+            'value': node.value
+        }
+    
+    def visit_ts_mean(self, node: TsMean) -> Dict[str, Any]:
+        """TsMean 노드 직렬화."""
+        return {
+            'type': 'TsMean',
+            'child': node.child.accept(self),  # Recursive
+            'window': node.window
+        }
+    
+    def visit_ts_any(self, node: TsAny) -> Dict[str, Any]:
+        """TsAny 노드 직렬화."""
+        return {
+            'type': 'TsAny',
+            'child': node.child.accept(self),
+            'window': node.window
+        }
+    
+    def visit_rank(self, node: Rank) -> Dict[str, Any]:
+        """Rank 노드 직렬화."""
+        return {
+            'type': 'Rank',
+            'child': node.child.accept(self)
+        }
+    
+    def visit_cs_quantile(self, node: CsQuantile) -> Dict[str, Any]:
+        """CsQuantile 노드 직렬화."""
+        return {
+            'type': 'CsQuantile',
+            'child': node.child.accept(self),
+            'q': node.q
+        }
+    
+    # ... implement for all other Expression types
+    # (And, Or, Add, Sub, Mul, Div, etc.)
+
+
+class DeserializationVisitor:
+    """Dict를 Expression tree로 역직렬화하는 visitor."""
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> Expression:
+        """Dict를 Expression으로 재구성.
+        
+        Args:
+            data: 직렬화된 Expression dict
+        
+        Returns:
+            재구성된 Expression 객체
+        """
+        expr_type = data['type']
+        
+        if expr_type == 'Field':
+            return Field(data['name'])
+        
+        elif expr_type == 'Constant':
+            return Constant(data['value'])
+        
+        elif expr_type == 'TsMean':
+            child = DeserializationVisitor.from_dict(data['child'])
+            return TsMean(child, window=data['window'])
+        
+        elif expr_type == 'TsAny':
+            child = DeserializationVisitor.from_dict(data['child'])
+            return TsAny(child, window=data['window'])
+        
+        elif expr_type == 'Rank':
+            child = DeserializationVisitor.from_dict(data['child'])
+            return Rank(child)
+        
+        elif expr_type == 'CsQuantile':
+            child = DeserializationVisitor.from_dict(data['child'])
+            return CsQuantile(child, q=data['q'])
+        
+        # ... handle all Expression types
+        
+        else:
+            raise ValueError(f"Unknown expression type: {expr_type}")
+
+
+class DependencyExtractor:
+    """Expression tree에서 Field dependencies를 추출하는 visitor."""
+    
+    def __init__(self):
+        self.dependencies: List[str] = []
+    
+    def visit_field(self, node: Field) -> None:
+        """Field 노드 방문 시 의존성 추가."""
+        self.dependencies.append(node.name)
+    
+    def visit_constant(self, node: Constant) -> None:
+        """Constant는 의존성 없음."""
+        pass
+    
+    def visit_ts_mean(self, node: TsMean) -> None:
+        """TsMean의 child 순회."""
+        node.child.accept(self)
+    
+    def visit_rank(self, node: Rank) -> None:
+        """Rank의 child 순회."""
+        node.child.accept(self)
+    
+    # ... implement for all operators
+    
+    @staticmethod
+    def extract(expr: Expression) -> List[str]:
+        """Expression에서 Field dependencies 추출.
+        
+        Args:
+            expr: Expression tree
+        
+        Returns:
+            List of unique field names
+        """
+        extractor = DependencyExtractor()
+        expr.accept(extractor)
+        return list(set(extractor.dependencies))  # Deduplicate
+```
+
+**Helper Functions for User Convenience**:
+
+```python
+# In alpha_canvas/core/expression.py (ADDED)
 
 class Expression:
     """Base Expression class."""
     
+    # ... existing methods ...
+    
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize Expression to dict (alpha-canvas 책임).
+        """Serialize Expression to dict (convenience wrapper).
         
         Returns:
-            Structured dict that can be saved as JSON
+            JSON-serializable dict representation
         """
-        raise NotImplementedError("Subclass must implement to_dict()")
+        from .serialization import SerializationVisitor
+        return self.accept(SerializationVisitor())
     
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> 'Expression':
-        """Deserialize dict to Expression (alpha-canvas 책임).
+        """Deserialize dict to Expression (convenience wrapper).
         
         Args:
             data: Serialized Expression dict
@@ -564,56 +794,25 @@ class Expression:
         Returns:
             Reconstructed Expression object
         """
-        raise NotImplementedError("Must be implemented by subclasses")
+        from .serialization import DeserializationVisitor
+        return DeserializationVisitor.from_dict(data)
     
     def get_field_dependencies(self) -> List[str]:
-        """Extract Field dependencies (alpha-canvas 책임).
+        """Extract Field dependencies (convenience wrapper).
         
         Returns:
             List of field names this Expression depends on
         """
-        deps = []
-        
-        if isinstance(self, Field):
-            deps.append(self.name)
-        elif hasattr(self, 'child'):
-            deps.extend(self.child.get_field_dependencies())
-        elif hasattr(self, 'left') and hasattr(self, 'right'):
-            deps.extend(self.left.get_field_dependencies())
-            deps.extend(self.right.get_field_dependencies())
-        
-        return list(set(deps))  # Deduplicate
+        from .serialization import DependencyExtractor
+        return DependencyExtractor.extract(self)
 ```
 
-```python
-# In alpha_canvas/core/expression.py - Field 구현 예시
-
-class Field(Expression):
-    def __init__(self, name: str):
-        self.name = name
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'type': 'Field',
-            'name': self.name
-        }
-
-# In alpha_canvas/ops/timeseries.py - TsMean 구현 예시
-
-class TsMean(Expression):
-    def __init__(self, child: Expression, window: int):
-        self.child = child
-        self.window = window
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'type': 'TsMean',
-            'child': self.child.to_dict(),
-            'window': self.window
-        }
-
-# Similar for all other Expression types...
-```
+**이점**:
+1. ✅ **Separation of Concerns**: Expression 클래스는 순수 도메인 로직에만 집중
+2. ✅ **확장성**: 새로운 직렬화 형식(YAML, Binary) 추가 시 새 visitor만 추가
+3. ✅ **유지보수성**: 직렬화 로직이 한 곳에 집중됨
+4. ✅ **테스트 용이성**: Visitor를 독립적으로 테스트 가능
+5. ✅ **기존 인프라 활용**: EvaluateVisitor와 동일한 패턴 사용
 
 ### 3.3. 사용 패턴
 
@@ -973,6 +1172,77 @@ def test_e2e_alpha_save_and_load():
 
 ---
 
+## 8. 다음 단계 (Next Steps)
+
+### 8.1. Phase 1 완료 검증 ✅
+
+**완료된 작업**:
+- ✅ ConfigLoader, DataLoader, DataSource 구현
+- ✅ BaseReader, ParquetReader 구현
+- ✅ Plugin architecture 구현
+- ✅ AlphaCanvas 통합 (breaking change)
+- ✅ 40 tests passing (100% success rate)
+- ✅ Experiment 20 validated
+- ✅ Showcase 17 & 18 completed
+- ✅ Committed: `feat: integrate DataSource into AlphaCanvas`
+
+### 8.2. Phase 2 시작 전 정리 작업
+
+**권장 작업 순서**:
+
+1. **Old DataLoader 제거** (alpha-canvas 내부):
+   - `src/alpha_canvas/core/data_loader.py` 삭제
+   - 더 이상 사용되지 않음 (DataSource로 완전 대체)
+   - 모든 테스트 여전히 통과하는지 확인
+
+**Note**: Remaining showcases (1-16) 업데이트는 선택사항입니다. Showcases는 temporal completeness를 위한 것이며, 필수 작업이 아닙니다. README.md 업데이트도 필요하지 않습니다.
+
+### 8.3. Phase 2: Data Storage 구현 (다음 큰 작업)
+
+**Phase 2 목표**:
+- DataWriter 구현 (field, alpha, factor 저장)
+- MetaTable 구현 (카탈로그)
+- LineageTracker 구현 (의존성 추적)
+
+**Phase 2 전제조건**:
+- ⚠️ **Expression 직렬화** (alpha-canvas에 Visitor Pattern으로 구현 필요):
+  - `SerializationVisitor` (Expression → dict)
+  - `DeserializationVisitor` (dict → Expression)
+  - `DependencyExtractor` (Extract Field dependencies)
+  - 모든 Expression 타입에 visit_* 메서드 구현 (Field, TsMean, Rank, etc.)
+  - Convenience wrappers: `Expression.to_dict()`, `Expression.from_dict()`, `Expression.get_field_dependencies()`
+
+**Phase 2 시작 전 확인사항**:
+- [ ] Phase 1 완전히 검증됨
+- [ ] Old DataLoader 제거됨
+- [ ] Documentation 업데이트됨
+- [ ] Expression 직렬화 설계 완료됨
+
+### 8.4. 즉시 실행 가능한 작업 (Quick Wins)
+
+**Option 1: Cleanup & Documentation** (추천)
+1. Old DataLoader 제거
+2. Showcase 업데이트 (1-16)
+3. README 업데이트
+4. Commit: `chore: remove old DataLoader and update showcases`
+
+**Option 2: Expression Serialization** (Phase 2 준비)
+1. `SerializationVisitor` 구현 (Expression → dict)
+2. `DeserializationVisitor` 구현 (dict → Expression)
+3. `DependencyExtractor` 구현 (Field dependencies)
+4. 모든 Expression 타입에 visitor 메서드 추가
+5. Convenience wrappers 구현 (`to_dict()`, `from_dict()`, `get_field_dependencies()`)
+6. Unit tests 작성
+7. Commit: `feat: add visitor-based Expression serialization`
+
+**Option 3: Phase 2 시작** (바로 진행)
+1. DataWriter 구현 시작
+2. Field 저장 기능부터 구현
+3. MetaTable skeleton 구현
+4. TDD로 진행
+
+---
+
 **Implementation Version**: 2.0 (Simplified)  
-**Last Updated**: 2025-01-23  
+**Last Updated**: 2025-01-23 (Phase 1 Complete)  
 **Core Principle**: **alpha-database는 데이터 CRUD와 쿼리에만 집중합니다.**

@@ -309,11 +309,19 @@ writer.write(
 3. **명확성**: 사용자가 의존성을 명시적으로 관리
 4. **유지보수성**: Expression 변경에 영향 받지 않음
 
-**Alpha-canvas Integration**:
+**Alpha-canvas Integration (Visitor Pattern)**:
 ```python
-# alpha-canvas에서 의존성 추출 (alpha-canvas의 책임)
+# alpha-canvas에서 의존성 추출 (Visitor Pattern 사용)
 expr = Rank(TsMean(Field('returns'), window=5))
-dependencies = expr.get_field_dependencies()  # alpha-canvas method
+
+# Option 1: Visitor로 직접 추출
+extractor = DependencyExtractor()
+expr.accept(extractor)
+dependencies = list(set(extractor.dependencies))
+# Returns: ['returns']
+
+# Option 2: Convenience wrapper 사용
+dependencies = expr.get_field_dependencies()  # Internally uses DependencyExtractor
 # Returns: ['returns']
 
 # alpha-database에 명시적 전달
@@ -433,10 +441,12 @@ flowchart LR
 - Meta Table (central registry, NEW)
 - LineageTracker (explicit dependencies only, NEW)
 
-**Alpha-canvas 통합**:
-- `Expression.to_dict()` 메서드 추가 (alpha-canvas 책임)
-- `Expression.get_field_dependencies()` 메서드 추가 (alpha-canvas 책임)
-- alpha-database는 결과만 저장
+**Alpha-canvas 통합 (Visitor Pattern)**:
+- `SerializationVisitor` 구현 (Expression → dict)
+- `DeserializationVisitor` 구현 (dict → Expression)
+- `DependencyExtractor` 구현 (Field dependencies)
+- Convenience wrappers: `Expression.to_dict()`, `Expression.from_dict()`, `Expression.get_field_dependencies()`
+- alpha-database는 직렬화된 결과(dict)만 저장
 
 ---
 
@@ -491,14 +501,16 @@ flowchart LR
 3. **명확성**: 사용자가 의존성을 명시적으로 관리
 4. **유연성**: Expression 외 다른 소스도 지원 가능
 
-**Alpha-canvas 지원**:
+**Alpha-canvas 지원 (Visitor Pattern)**:
 ```python
-# alpha-canvas가 helper method 제공
+# alpha-canvas가 DependencyExtractor Visitor 제공
 expr = Rank(TsMean(Field('returns'), window=5))
-deps = expr.get_field_dependencies()  # alpha-canvas method
+
+# Visitor로 의존성 추출
+deps = expr.get_field_dependencies()  # Internally uses DependencyExtractor visitor
 # Returns: ['returns']
 
-# 사용자가 alpha-database에 전달
+# 사용자가 alpha-database에 명시적 전달
 writer.write(..., dependencies=deps)
 ```
 
@@ -525,16 +537,50 @@ writer.write(..., dependencies=deps)
 1. **책임 분리**: Expression은 alpha-canvas의 핵심 개념
 2. **Loose Coupling**: alpha-database는 Expression 구조를 몰라도 됨
 3. **변경 용이성**: Expression 구조 변경 시 alpha-database 영향 없음
-4. **명시성**: alpha-canvas가 `to_dict()` 메서드 제공
+4. **명시성**: alpha-canvas가 Visitor Pattern으로 직렬화 제공
 
-**Pattern**:
+**Visitor Pattern for Serialization**:
+
+alpha-canvas는 **Visitor Pattern**을 사용하여 Expression 직렬화를 구현합니다:
+
 ```python
-# alpha-canvas가 직렬화 (alpha-canvas의 책임)
-expr = Rank(TsMean(Field('returns'), window=5))
-expr_dict = expr.to_dict()  # alpha-canvas method
+# In alpha-canvas (alpha-canvas의 책임)
 
-# alpha-database는 결과만 저장 (alpha-database의 책임)
+# 1. Visitor로 직렬화
+expr = Rank(TsMean(Field('returns'), window=5))
+serializer = SerializationVisitor()
+expr_dict = expr.accept(serializer)
+# Returns: {
+#   'type': 'Rank',
+#   'child': {
+#     'type': 'TsMean',
+#     'child': {'type': 'Field', 'name': 'returns'},
+#     'window': 5
+#   }
+# }
+
+# 2. Convenience wrapper (optional)
+expr_dict = expr.to_dict()  # Internally calls SerializationVisitor
+
+# 3. alpha-database는 결과만 저장
 writer.write(..., metadata={'expression': expr_dict})
+```
+
+**Visitor Pattern 이점**:
+1. ✅ **Separation of Concerns**: Expression 클래스는 직렬화 로직과 분리
+2. ✅ **확장성**: 새 직렬화 형식(YAML, Binary) 추가 시 새 visitor만 추가
+3. ✅ **유지보수성**: 직렬화 로직이 `SerializationVisitor` 한 곳에 집중
+4. ✅ **기존 인프라 활용**: `EvaluateVisitor`와 동일한 패턴 사용
+
+**Alpha-canvas 구현 구조**:
+```
+alpha_canvas/core/serialization.py (NEW)
+├── SerializationVisitor     # Expression → dict
+├── DeserializationVisitor   # dict → Expression
+└── DependencyExtractor      # Extract Field dependencies
+
+alpha_canvas/core/expression.py (UPDATED)
+└── Expression.to_dict()     # Convenience wrapper (calls SerializationVisitor)
 ```
 
 ### 6.6. 왜 Dependency Injection인가?
