@@ -23,6 +23,7 @@ poetry run python showcase/13_signal_assignment.py
 poetry run python showcase/14_weight_scaling.py
 poetry run python showcase/15_weight_caching_pnl.py
 poetry run python showcase/16_backtest_attribution.py
+poetry run python showcase/17_alpha_database_datasource.py
 ```
 
 Or run all showcases in sequence:
@@ -215,6 +216,18 @@ poetry run python showcase/run_all.py
 
 **Key Features**: Triple-cache architecture (signal + weight + port_return), position-level attribution, shift-mask workflow, forward-bias prevention, winner/loser analysis, rc.get_port_return(), rc.get_daily_pnl(), rc.get_cumulative_pnl()
 
+### 17. alpha-database DataSource (`17_alpha_database_datasource.py`)
+- Config-driven data loading with DataSource facade
+- Stateless design (dates passed per call, not in constructor)
+- Reusable DataSource instance for multiple fields
+- Multiple date ranges with same instance (no state pollution)
+- Plugin architecture for custom readers
+- Field catalog exploration
+- Comparison with alpha-canvas DataLoader
+- Future integration preview (dependency injection)
+
+**Key Features**: DataSource facade, stateless design, plugin readers, alpha-database package independence, BaseReader interface, ParquetReader core implementation, backward compatibility with alpha-canvas
+
 ## Expected Output
 
 Each showcase produces detailed terminal output showing:
@@ -228,9 +241,9 @@ All showcases should complete with `[SUCCESS]` verdicts, demonstrating that the 
 ## Foundation Test Results
 
 The complete MVP foundation has:
-- ✅ **176 tests passing** (100% success rate)
-- ✅ **19 experiments validated** (all SUCCESS)
-- ✅ **17 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment, Weight Scaling, Weight Caching, **Backtesting with Portfolio Returns**
+- ✅ **183 tests passing** (100% success rate) - 176 alpha-canvas + 7 alpha-database
+- ✅ **20 experiments validated** (all SUCCESS)
+- ✅ **18 phases complete**: Config, DataPanel, Expression, Facade, Parquet Data Loading, TsMean, Refactoring, TsAny, Rank, Universe Masking, Boolean Expressions, DataAccessor, cs_quantile, Signal Assignment, Weight Scaling, Weight Caching, Backtesting with Portfolio Returns, **alpha-database Package**
 - ✅ **Production-ready** architecture (Facade, Composite, Visitor, Strategy patterns)
 - ✅ **Data pipeline**: Parquet → DuckDB → xarray → AlphaCanvas (~5.38ms per field)
 - ✅ **Operator library**: TsMean, TsAny, Rank, CsQuantile, Constant, Equals, GreaterThan, And, Or, Not (+ 6 more logical operators)
@@ -242,6 +255,7 @@ The complete MVP foundation has:
 - ✅ **Weight Scaling**: Strategy Pattern with GrossNetScaler (vectorized, 7-40ms, target_gross=2.0, target_net=0.0)
 - ✅ **Weight Caching**: Dual-cache architecture (signals + weights) for step-by-step PnL tracing and efficient scaler comparison
 - ✅ **Backtesting**: Triple-cache with position-level returns, shift-mask workflow, forward-bias prevention, winner/loser attribution (7ms for 252×100)
+- ✅ **alpha-database Package**: Stateless DataSource facade, config-driven data loading, plugin architecture for custom readers, 100% identical results to alpha-canvas DataLoader (Experiment 20 validated)
 
 ---
 
