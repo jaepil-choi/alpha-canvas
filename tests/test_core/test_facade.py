@@ -131,20 +131,6 @@ class TestAlphaCanvas:
         assert type(dataset) == xr.Dataset  # Exact type, not subclass
         assert not isinstance(dataset, AlphaCanvas)
     
-    def test_config_loader_accessible(self):
-        """Test that ConfigLoader is accessible."""
-        ds = DataSource('config')
-        rc = AlphaCanvas(
-            data_source=ds,
-            start_date='2024-01-01',
-            end_date='2024-01-31'
-        )
-        
-        # Should have config
-        assert hasattr(rc, '_config')
-        fields = rc._config.list_fields()
-        assert len(fields) > 0
-    
     def test_evaluator_syncs_with_dataset(self):
         """Test that evaluator stays synced with dataset changes."""
         ds = DataSource('config')

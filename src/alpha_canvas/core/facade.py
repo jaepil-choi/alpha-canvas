@@ -9,7 +9,6 @@ import pandas as pd
 import xarray as xr
 from typing import Union, Optional, TYPE_CHECKING
 
-from .config import ConfigLoader
 from .data_model import DataPanel
 from .expression import Expression
 from .visitor import EvaluateVisitor
@@ -31,7 +30,6 @@ class AlphaCanvas:
     - Supporting the "Open Toolkit" pattern (eject/inject)
     
     Attributes:
-        _config: ConfigLoader instance for YAML configuration
         _panel: DataPanel instance wrapping xarray.Dataset
         _evaluator: EvaluateVisitor for Expression tree evaluation
         rules: Dictionary storing Expression objects by name
@@ -97,9 +95,6 @@ class AlphaCanvas:
         self._data_source = data_source
         self.start_date = start_date
         self.end_date = end_date
-        
-        # Load configurations (still needed for some operations)
-        self._config = ConfigLoader(config_dir)
         
         # Lazy panel creation - will be initialized from first data load
         self._panel = None
@@ -179,20 +174,19 @@ class AlphaCanvas:
         if self._panel is None:
             return
         
-        # Check if 'returns' field exists in config
-        if 'returns' not in self._config.data_config:
+        # Load returns data via DataSource
+        try:
+            returns_data = self._data_source.load_field(
+                'returns',
+                start_date=self.start_date,
+                end_date=self.end_date
+            )
+        except KeyError:
             raise ValueError(
                 "Return data is mandatory for backtesting. "
                 "Missing 'returns' field in config/data.yaml. "
                 "Please add a 'returns' field definition."
             )
-        
-        # Load returns data via DataSource
-        returns_data = self._data_source.load_field(
-            'returns',
-            start_date=self.start_date,
-            end_date=self.end_date
-        )
         
         # Validate shape
         expected_shape = (
